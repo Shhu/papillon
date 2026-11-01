@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Papillon — sticky notes</title>
+<meta name="description" content="Papillon: sticky notes floating on your desktop, saved as you type and back where you left them. A portable .exe on Windows, a Flatpak on Linux. English and French, free and open source.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg0:#15171C;--bg1:#1B1E24;--bg2:#22262E;--bg3:#2A2F38;--ln:#2C313A;--tx:#E7E9EE;--mu:#9AA3B2;--fa:#7D8696;--ac:#FFD84D;--onac:#2B2308;--acs:rgba(255,216,77,.15)}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg0);color:var(--tx);font:16px/1.55 'Inter',system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:inherit}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+header{position:sticky;top:0;z-index:10;background:rgba(21,23,28,.85);backdrop-filter:blur(10px);border-bottom:1px solid var(--ln)}
+header .wrap{display:flex;align-items:center;gap:24px;height:60px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:17px;text-decoration:none}
+.brand img{width:28px;height:28px}
+nav{display:flex;gap:4px;margin-left:auto}
+nav a{color:var(--mu);text-decoration:none;font-size:14px;padding:6px 10px;border-radius:6px}
+nav a:hover{color:var(--tx);background:var(--bg3)}
+.lang{display:flex;padding:2px;border-radius:7px;background:var(--bg1);border:1px solid var(--ln)}
+.lang button{font:500 12px 'JetBrains Mono',monospace;color:var(--mu);background:none;border:0;padding:4px 8px;border-radius:5px;cursor:pointer}
+.lang button[aria-pressed=true]{background:var(--bg3);color:var(--tx)}
+.hero{padding:88px 0 40px;text-align:center}
+.hero img.logo{width:84px;height:84px;margin-bottom:22px}
+h1{font-size:clamp(36px,6vw,58px);line-height:1.08;letter-spacing:-.02em;margin:0 0 18px;font-weight:700}
+.lead{font-size:clamp(17px,2.2vw,20px);color:var(--mu);max-width:680px;margin:0 auto 34px}
+.cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:10px;height:46px;padding:0 20px;border-radius:9px;font-weight:600;font-size:15px;text-decoration:none;border:1px solid var(--ln);background:var(--bg3)}
+.btn:hover{background:#323844}
+.btn.pri{background:var(--ac);border-color:transparent;color:var(--onac)}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn small{font:500 12px 'JetBrains Mono',monospace;opacity:.75}
+.meta{margin-top:14px;font-size:13px;color:var(--fa)}
+.shot{margin:56px auto 0;border-radius:12px;overflow:hidden;border:1px solid var(--ln);box-shadow:0 30px 80px rgba(0,0,0,.6)}
+.shot img{display:block;width:100%;height:auto}
+section{padding:72px 0}
+h2{font-size:clamp(26px,3.6vw,36px);letter-spacing:-.015em;margin:0 0 12px}
+.sub{color:var(--mu);margin:0 0 36px;max-width:640px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
+.card{background:var(--bg2);border:1px solid var(--ln);border-radius:12px;padding:20px}
+.card .ic{width:36px;height:36px;border-radius:9px;background:var(--acs);color:var(--ac);display:flex;align-items:center;justify-content:center;margin-bottom:14px;font:600 15px 'JetBrains Mono',monospace}
+.card h3{margin:0 0 6px;font-size:16px}
+.card p{margin:0;color:var(--mu);font-size:14.5px}
+.gallery{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+.gallery figure{margin:0}
+.gallery .shot{margin:0}
+.gallery figcaption{color:var(--fa);font-size:14px;margin-top:10px}
+.dl{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+.dl .card{display:flex;flex-direction:column;gap:12px}
+.dl .card p{flex:1}
+kbd{font:500 12px 'JetBrains Mono',monospace;padding:1px 6px;border-radius:4px;border:1px solid #363C47;background:var(--bg1);color:var(--mu)}
+footer{border-top:1px solid var(--ln);padding:28px 0 40px;color:var(--fa);font-size:14px}
+footer .wrap{display:flex;gap:16px;flex-wrap:wrap;justify-content:space-between}
+[hidden]{display:none!important}
+html:not([lang=en]) [data-lang=en],html:not([lang=fr]) [data-lang=fr]{display:none!important}
+@media (max-width:820px){.gallery{grid-template-columns:1fr}nav a{display:none}}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <a class="brand" href="#"><img src="icon.svg" alt="">Papillon</a>
+    <nav>
+      <a href="#features"><span data-lang="en">Features</span><span data-lang="fr">Fonctionnalités</span></a>
+      <a href="#download"><span data-lang="en">Download</span><span data-lang="fr">Télécharger</span></a>
+    </nav>
+    <div class="lang" role="group" aria-label="Language">
+      <button data-set="en" aria-pressed="false">EN</button>
+      <button data-set="fr" aria-pressed="false">FR</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="wrap hero">
+    <img class="logo" src="icon.svg" alt="">
+    <h1 data-lang="en">Sticky notes,<br>floating on your desktop</h1>
+    <h1 data-lang="fr">Des notes flottantes<br>sur votre bureau</h1>
+    <p class="lead" data-lang="en">Jot it down, leave it where you can see it. Papillon replaces Windows' Sticky Notes with something small and quick, on Linux too.</p>
+    <p class="lead" data-lang="fr">Notez, laissez la note bien en vue. Papillon remplace les Pense-bêtes de Windows par un outil petit et rapide, aussi sous Linux.</p>
+    <div class="cta">
+      <a class="btn pri" href="https://github.com/Shhu/papillon/releases/latest/download/papillon.exe" data-asset="papillon.exe">
+        <span data-lang="en">Download for Windows</span><span data-lang="fr">Télécharger pour Windows</span>
+        <small class="size"></small>
+      </a>
+      <a class="btn" href="https://shu-app.com/flatpak/papillon.flatpakref">
+        <span>Linux (Flatpak)</span>
+      </a>
+    </div>
+    <p class="meta"><span class="version"></span><span data-lang="en">Windows 10 and 11, 64-bit · a single file, nothing to install</span><span data-lang="fr">Windows 10 et 11, 64 bits · un seul fichier, rien à installer</span></p>
+    <div class="shot"><img data-shot="main" data-alt-en="Four colored notes on a desktop, beside the list of notes" data-alt-fr="Quatre notes de couleur sur un bureau, à côté de la liste des notes" alt="" width="1160" height="620"></div>
+  </div>
+
+  <section id="features">
+    <div class="wrap">
+      <h2 data-lang="en">Small, and it stays where you put it</h2>
+      <h2 data-lang="fr">Petit, et ça reste où vous l'avez mis</h2>
+      <p class="sub" data-lang="en">No account and no menus to learn: a note, some text, and that's it.</p>
+      <p class="sub" data-lang="fr">Sans compte ni menus à apprendre&nbsp;: une note, du texte, et c'est tout.</p>
+      <div class="grid">
+        <div class="card"><div class="ic">⧉</div>
+          <h3 data-lang="en">Each note, its own window</h3><h3 data-lang="fr">Chaque note, sa fenêtre</h3>
+          <p data-lang="en">Move and resize notes anywhere on the desktop: they come back exactly where you left them.</p>
+          <p data-lang="fr">Déplacez et redimensionnez vos notes sur le bureau&nbsp;: elles reviennent exactement là où vous les avez laissées.</p></div>
+        <div class="card"><div class="ic">↥</div>
+          <h3 data-lang="en">On top when it counts</h3><h3 data-lang="fr">Au premier plan quand il le faut</h3>
+          <p data-lang="en">Pin a note above the other windows, leave the others behind your work.</p>
+          <p data-lang="fr">Épinglez une note au-dessus des autres fenêtres, laissez les autres derrière votre travail.</p></div>
+        <div class="card"><div class="ic">◐</div>
+          <h3 data-lang="en">Seven colors</h3><h3 data-lang="fr">Sept couleurs</h3>
+          <p data-lang="en">Yellow, of course, and six others. Three text sizes, dark and light themes for the list.</p>
+          <p data-lang="fr">Le jaune, bien sûr, et six autres. Trois tailles de texte, thèmes sombre et clair pour la liste.</p></div>
+        <div class="card"><div class="ic">⌕</div>
+          <h3 data-lang="en">A list to find everything</h3><h3 data-lang="fr">Une liste pour tout retrouver</h3>
+          <p data-lang="en">Search your notes, reopen the ones you closed, delete the ones you no longer need.</p>
+          <p data-lang="fr">Cherchez dans vos notes, rouvrez celles que vous avez fermées, supprimez celles qui ne servent plus.</p></div>
+        <div class="card"><div class="ic">✓</div>
+          <h3 data-lang="en">Nothing to save</h3><h3 data-lang="fr">Rien à enregistrer</h3>
+          <p data-lang="en">Written to disk as you type, on your computer only. No account, no cloud.</p>
+          <p data-lang="fr">Écrit sur le disque pendant la frappe, sur votre ordinateur seulement. Sans compte, sans cloud.</p></div>
+        <div class="card"><div class="ic">⏻</div>
+          <h3 data-lang="en">There when you sit down</h3><h3 data-lang="fr">Là quand vous arrivez</h3>
+          <p data-lang="en">Can start with the computer, and stays quiet: no processor use while you are not typing.</p>
+          <p data-lang="fr">Peut démarrer avec l'ordinateur et reste discret&nbsp;: aucune charge du processeur quand vous n'écrivez pas.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="download">
+    <div class="wrap">
+      <h2 data-lang="en">Download</h2>
+      <h2 data-lang="fr">Télécharger</h2>
+      <p class="sub" data-lang="en">Free and open source (MIT or Apache 2.0): <a href="https://github.com/Shhu/papillon">source code on GitHub</a>. Papillon is in English and French and follows your system's language.</p>
+      <p class="sub" data-lang="fr">Gratuit et open source (MIT ou Apache 2.0)&nbsp;: <a href="https://github.com/Shhu/papillon">code source sur GitHub</a>. Papillon est en français et en anglais, et suit la langue de votre système.</p>
+      <div class="dl">
+        <div class="card">
+          <h3>Windows</h3>
+          <p data-lang="en">Windows 10 and 11, 64-bit. A single portable .exe: download it and run it.</p>
+          <p data-lang="fr">Windows 10 et 11, 64 bits. Un seul .exe portable&nbsp;: téléchargez-le et lancez-le.</p>
+          <a class="btn pri" href="https://github.com/Shhu/papillon/releases/latest/download/papillon.exe" data-asset="papillon.exe"><span data-lang="en">Download .exe</span><span data-lang="fr">Télécharger le .exe</span><small class="size"></small></a>
+        </div>
+        <div class="card">
+          <h3>Linux</h3>
+          <p data-lang="en">Flatpak, updated with your other Flatpak apps (software center or <kbd>flatpak update</kbd>): <kbd>flatpak install --user https://shu-app.com/flatpak/papillon.flatpakref</kbd></p>
+          <p data-lang="fr">Flatpak, mis à jour avec vos autres applications Flatpak (logithèque ou <kbd>flatpak update</kbd>)&nbsp;: <kbd>flatpak install --user https://shu-app.com/flatpak/papillon.flatpakref</kbd></p>
+          <a class="btn" href="https://shu-app.com/flatpak/papillon.flatpakref"><span data-lang="en">Install the Flatpak</span><span data-lang="fr">Installer le Flatpak</span></a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Papillon <span class="tag"></span></span>
+    <span data-lang="en">Made with Rust and egui · <a href="https://github.com/Shhu/papillon">Source code</a> (MIT or Apache 2.0) · <a href="https://shu-app.com/">More apps</a></span>
+    <span data-lang="fr">Fait avec Rust et egui · <a href="https://github.com/Shhu/papillon">Code source</a> (MIT ou Apache 2.0) · <a href="https://shu-app.com/">Autres applications</a></span>
+  </div>
+</footer>
+
+<script>
+// Language: the one chosen here, else the browser's (French or English).
+const saved = (() => { try { return localStorage.getItem('lang'); } catch { return null; } })();
+const browser = (navigator.language || 'en').toLowerCase().startsWith('fr') ? 'fr' : 'en';
+function setLang(l) {
+  document.documentElement.lang = l;
+  document.querySelectorAll('.lang button').forEach(b => b.setAttribute('aria-pressed', b.dataset.set === l));
+  document.querySelectorAll('img[data-shot]').forEach(img => {
+    img.src = `shots/${l}-${img.dataset.shot}.webp`;
+    const alt = img.dataset[l === 'fr' ? 'altFr' : 'altEn'];
+    if (alt) img.alt = alt;
+  });
+  try { localStorage.setItem('lang', l); } catch {}
+}
+document.querySelectorAll('.lang button').forEach(b => b.addEventListener('click', () => setLang(b.dataset.set)));
+setLang(saved === 'fr' || saved === 'en' ? saved : browser);
+
+// Version and file sizes of the latest release.
+fetch('https://api.github.com/repos/Shhu/papillon/releases?per_page=10')
+  .then(r => r.ok ? r.json() : null).then(list => {
+  const releases = (list || []).filter(r => !r.draft && !r.prerelease);
+  if (!releases.length) return;
+  const latest = releases[0];
+  document.querySelectorAll('.version').forEach(e => { e.textContent = latest.tag_name + ' · '; });
+  document.querySelectorAll('.tag').forEach(e => { e.textContent = latest.tag_name; });
+  document.querySelectorAll('[data-asset]').forEach(el => {
+    const asset = latest.assets.find(a => a.name === el.dataset.asset);
+    if (!asset) return;
+    el.href = asset.browser_download_url;
+    const mb = Math.round(asset.size / 1e6);
+    el.querySelectorAll('.size').forEach(e => {
+      e.innerHTML = `<span data-lang="en">${mb} MB</span><span data-lang="fr">${mb} Mo</span>`;
+    });
+  });
+}).catch(() => {});
+</script>
+</body>
+</html>

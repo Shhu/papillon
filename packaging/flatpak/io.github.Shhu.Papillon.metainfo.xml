@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.Shhu.Papillon</id>
+  <name>Papillon</name>
+  <summary>Sticky notes floating on your desktop</summary>
+  <summary xml:lang="fr">Des notes flottantes sur votre bureau</summary>
+  <developer id="io.github.shhu">
+    <name>Shhu</name>
+  </developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <description>
+    <p>Papillon puts sticky notes on your desktop, each in its own small window, in English and French.</p>
+    <p xml:lang="fr">Papillon pose des notes sur votre bureau, chacune dans sa petite fenêtre, en français et en anglais.</p>
+    <ul>
+      <li>Notes come back where you left them, saved as you type</li>
+      <li xml:lang="fr">Les notes reviennent là où vous les avez laissées, enregistrées pendant la frappe</li>
+      <li>Seven colors, three text sizes</li>
+      <li xml:lang="fr">Sept couleurs, trois tailles de texte</li>
+      <li>Keep a note above the other windows</li>
+      <li xml:lang="fr">Une note peut rester au-dessus des autres fenêtres</li>
+      <li>A list to find, reopen and delete notes</li>
+      <li xml:lang="fr">Une liste pour retrouver, rouvrir et supprimer les notes</li>
+      <li>Starts with the computer if you wish</li>
+      <li xml:lang="fr">Démarre avec l'ordinateur si vous le souhaitez</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.Shhu.Papillon.desktop</launchable>
+  <url type="homepage">https://shu-app.com/papillon/</url>
+  <url type="bugtracker">https://github.com/Shhu/papillon/issues</url>
+  <url type="vcs-browser">https://github.com/Shhu/papillon</url>
+  <branding>
+    <color type="primary" scheme_preference="light">#fff4b0</color>
+    <color type="primary" scheme_preference="dark">#7a4a12</color>
+  </branding>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <releases>
+    <release version="0.1.0" date="2026-11-01">
+      <description>
+        <p>First version: notes on the desktop, colors, keeping on top, a list with search, starting with the computer.</p>
+      </description>
+    </release>
+  </releases>
+</component>

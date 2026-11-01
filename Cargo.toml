@@ -1,0 +1,27 @@
+[package]
+name = "papillon"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Sticky notes floating on your desktop"
+repository = "https://github.com/Shhu/papillon"
+build = "build.rs"
+
+[dependencies]
+eframe = "0.36.2"
+egui-phosphor = "0.14"
+fluent-bundle = "0.16"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sys-locale = "0.3"
+
+[dev-dependencies]
+egui_kittest = { version = "0.36", features = ["wgpu", "snapshot", "eframe"] }
+fluent-syntax = "0.12"
+
+[build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+lto = true
+strip = true

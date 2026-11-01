@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Papillon
+Comment=Sticky notes floating on your desktop
+Comment[fr]=Des notes flottantes sur votre bureau
+Exec=papillon
+Icon=io.github.Shhu.Papillon
+Terminal=false
+Categories=Utility;
+Keywords=notes;sticky;memo;post;reminder;pense-bête;
+StartupWMClass=io.github.Shhu.Papillon

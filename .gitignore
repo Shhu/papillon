@@ -1,0 +1,7 @@
+/target
+/packaging/flatpak/build
+/packaging/flatpak/repo
+/packaging/flatpak/.flatpak-builder
+/packaging/flatpak/*.flatpak
+/packaging/flatpak/build.log
+/capture.png
