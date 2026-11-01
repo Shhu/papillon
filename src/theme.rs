@@ -16,6 +16,8 @@ pub struct Palette {
     pub surface: Color32,
     pub raised: Color32,
     pub line: Color32,
+    /// Around fields and controls, which must stand out.
+    pub control_line: Color32,
     pub text: Color32,
     pub muted: Color32,
     pub faint: Color32,
@@ -38,6 +40,7 @@ pub const DARK: Palette = Palette {
     surface: rgb(0x22262E),
     raised: rgb(0x2A2F38),
     line: rgb(0x2C313A),
+    control_line: rgb(0x6B7484),
     text: rgb(0xE7E9EE),
     muted: rgb(0x9AA3B2),
     faint: rgb(0x8F98A8),
@@ -52,6 +55,7 @@ pub const LIGHT: Palette = Palette {
     surface: rgb(0xFFFFFF),
     raised: rgb(0xECEEF2),
     line: rgb(0xE2E5EA),
+    control_line: rgb(0x868E9C),
     text: rgb(0x1A1D23),
     muted: rgb(0x576070),
     faint: rgb(0x6B7280),
@@ -225,7 +229,7 @@ fn style(style: &mut egui::Style, p: &Palette) {
     w.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
     w.noninteractive.corner_radius = radius;
     for (state, fill, stroke, text) in [
-        (&mut w.inactive, p.surface, p.line, p.text),
+        (&mut w.inactive, p.surface, p.control_line, p.text),
         (&mut w.hovered, p.raised, p.line, p.text),
         (&mut w.active, p.raised, p.accent_ink, p.text),
         (&mut w.open, p.raised, p.line, p.text),

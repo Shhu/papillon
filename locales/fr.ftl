@@ -49,3 +49,4 @@ menu-bring-back = Ramener toutes les notes à l’écran
 menu-website = Site web
 menu-licenses = Licences
 menu-quit = Quitter Papillon
+licenses-back = Retour

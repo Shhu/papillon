@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 """Writes assets/licenses.txt: the license texts of Papillon and of everything
-built into its binaries, read from the crates cargo downloaded. Run it after
-any change to Cargo.lock; publish.sh refuses a file that is out of date."""
+built into its binaries, read from the crates cargo downloaded, or from
+packaging/licenses/<crate>/ for the crates that don't ship them. Fails if a
+crate has no text at all. Run it after any change to Cargo.lock; publish.sh
+refuses a file that is out of date."""
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
-names = re.compile(r"^(licen[sc]e|copying|notice|unlicense)", re.I)
+names = re.compile(
+    r"^(licen[sc]e|copying|notice|unlicense|ofl|ufl|.*-mit-license|hack-regular\.txt)", re.I
+)
+supplement = root / "packaging" / "licenses"
+RUST = ("Rust standard library", "MIT OR Apache-2.0", "https://github.com/rust-lang/rust")
 
 normal = set()
 for target in ("x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"):
     tree = subprocess.run(
-        ["cargo", "tree", "-e", "normal", "--prefix", "none", "--target", target, "-f", "{p}"],
+        ["cargo", "tree", "--locked", "-e", "normal", "--prefix", "none", "--target", target, "-f", "{p}"],
         cwd=root, check=True, capture_output=True, text=True,
     ).stdout
     for line in tree.splitlines():
@@ -28,6 +35,7 @@ meta = json.loads(subprocess.run(
 
 out = ["Papillon and the works built into it\n"]
 seen = {}
+missing = []
 for name in ("LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES.md", "assets/fonts/Inter-OFL.txt"):
     out.append(f"\n{'=' * 72}\n{name}\n{'=' * 72}\n\n{(root / name).read_text()}")
 
@@ -36,7 +44,12 @@ for package in sorted(meta["packages"], key=lambda p: (p["name"], p["version"]))
     if key not in normal or package["name"] == "papillon":
         continue
     crate = Path(package["manifest_path"]).parent
-    texts = sorted(p for p in crate.iterdir() if p.is_file() and names.match(p.name))
+    texts = sorted(p for p in crate.rglob("*") if p.is_file() and names.match(p.name))
+    texts = [p for p in texts if "target" not in p.relative_to(crate).parts]
+    if not texts and (supplement / key[0]).is_dir():
+        texts = sorted((supplement / key[0]).iterdir())
+    if not texts:
+        missing.append(f"{key[0]} {key[1]}")
     out.append(f"\n{'=' * 72}\n{key[0]} {key[1]}: {package.get('license') or 'see its repository'}\n{'=' * 72}\n")
     if package.get("repository"):
         out.append(f"{package['repository']}\n")
@@ -49,4 +62,9 @@ for package in sorted(meta["packages"], key=lambda p: (p["name"], p["version"]))
             seen[content] = f"{key[0]} {key[1]}, {text.name}"
             out.append(f"\n{content}")
 
+out.append(
+    f"\n{'=' * 72}\n{RUST[0]}: {RUST[1]}, under the same texts as above\n{'=' * 72}\n{RUST[2]}\n"
+)
+if missing:
+    sys.exit("No license text for: " + ", ".join(missing))
 (root / "assets" / "licenses.txt").write_text("".join(out))

@@ -1,56 +1,250 @@
 //! Whether a window would be seen, for notes left on a monitor that is gone.
-//! Saying yes when unsure: moving a visible note would be worse.
+//! Saying yes when unsure: moving a visible note would be worse. Positions are
+//! physical pixels and sizes points; a width is taken at the largest usual
+//! scale, again to say yes when unsure.
 
 /// The part of a note that must be on a monitor to be reached: its strip.
-const STRIP_HEIGHT: f32 = 30.0;
+const STRIP_HEIGHT: i32 = 30;
+const LARGEST_SCALE: f32 = 4.0;
+/// What must be within a monitor for a new note to be of use, in pixels.
+const USABLE: [i32; 2] = [200, 120];
+
+/// x, y, right, bottom.
+type Area = [i32; 4];
+
+#[cfg(any(test, not(windows)))]
+fn overlap(a: Area, b: Area) -> bool {
+    a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+}
+
+fn contains(outer: Area, inner: Area) -> bool {
+    outer[0] <= inner[0] && outer[1] <= inner[1] && inner[2] <= outer[2] && inner[3] <= outer[3]
+}
+
+fn strip(position: [f32; 2], size: [f32; 2]) -> Area {
+    let [x, y] = position.map(|v| v as i32);
+    [x, y, x + (size[0] * LARGEST_SCALE) as i32, y + STRIP_HEIGHT]
+}
+
+fn usable(position: [f32; 2]) -> Area {
+    let [x, y] = position.map(|v| v as i32);
+    [x, y, x + USABLE[0], y + USABLE[1]]
+}
 
 #[cfg(windows)]
-pub fn shows(position: [f32; 2], size: [f32; 2]) -> bool {
+mod platform {
+    use super::Area;
+    use core::ffi::c_void;
+
     #[repr(C)]
+    #[derive(Clone, Copy)]
     struct Rect {
         left: i32,
         top: i32,
         right: i32,
         bottom: i32,
     }
+
+    #[repr(C)]
+    struct MonitorInfo {
+        size: u32,
+        monitor: Rect,
+        work: Rect,
+        flags: u32,
+    }
+
     const MONITOR_DEFAULTTONULL: u32 = 0;
+
     #[link(name = "user32")]
     unsafe extern "system" {
-        fn MonitorFromRect(rect: *const Rect, flags: u32) -> *mut core::ffi::c_void;
+        fn MonitorFromRect(rect: *const Rect, flags: u32) -> *mut c_void;
+        fn GetMonitorInfoW(monitor: *mut c_void, info: *mut MonitorInfo) -> i32;
     }
-    let rect = Rect {
-        left: position[0] as i32,
-        top: position[1] as i32,
-        right: (position[0] + size[0]) as i32,
-        bottom: (position[1] + STRIP_HEIGHT) as i32,
-    };
-    // Only reads the rectangle, which outlives the call.
-    !unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) }.is_null()
-}
 
-/// X11's screen spans the monitors, and shrinks when one goes.
-#[cfg(not(windows))]
-pub fn shows(position: [f32; 2], size: [f32; 2]) -> bool {
-    use x11_dl::xlib::Xlib;
-    let Ok(xlib) = Xlib::open() else {
-        return true;
-    };
-    // The display is checked before use, and closed once it's been read.
-    let (width, height) = unsafe {
-        let display = (xlib.XOpenDisplay)(std::ptr::null());
-        if display.is_null() {
+    fn monitor_of(area: Area) -> *mut c_void {
+        let rect = Rect {
+            left: area[0],
+            top: area[1],
+            right: area[2],
+            bottom: area[3],
+        };
+        // Only reads the rectangle, which outlives the call.
+        unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) }
+    }
+
+    pub fn shows(area: Area) -> bool {
+        !monitor_of(area).is_null()
+    }
+
+    /// Within the monitor's work area, so clear of the taskbar.
+    pub fn fits(area: Area) -> bool {
+        let monitor = monitor_of(area);
+        if monitor.is_null() {
+            return false;
+        }
+        let empty = Rect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let mut info = MonitorInfo {
+            size: size_of::<MonitorInfo>() as u32,
+            monitor: empty,
+            work: empty,
+            flags: 0,
+        };
+        // The monitor was just given by the system; `info` has its size set.
+        if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
             return true;
         }
-        let screen = (xlib.XDefaultScreen)(display);
-        let dimensions = (
-            (xlib.XDisplayWidth)(display, screen),
-            (xlib.XDisplayHeight)(display, screen),
-        );
-        (xlib.XCloseDisplay)(display);
-        dimensions
-    };
-    position[0] < width as f32
-        && position[0] + size[0] > 0.0
-        && position[1] < height as f32
-        && position[1] + STRIP_HEIGHT > 0.0
+        let work = info.work;
+        super::contains([work.left, work.top, work.right, work.bottom], area)
+    }
+}
+
+#[cfg(not(windows))]
+mod platform {
+    use super::Area;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use x11_dl::xlib::Xlib;
+    use x11_dl::xrandr::Xrandr;
+
+    /// Room left for a panel at the bottom when placing a new note.
+    const PANEL: i32 = 60;
+    /// Monitors change rarely, and asking opens a connection to the X server.
+    const FRESH_FOR: Duration = Duration::from_secs(5);
+
+    static KNOWN: Mutex<Option<(Instant, Vec<Area>)>> = Mutex::new(None);
+
+    /// The monitors, or the whole screen if that's all that can be known.
+    /// Empty when nothing is known at all.
+    fn monitors() -> Vec<Area> {
+        let mut known = crate::store::lock(&KNOWN);
+        if let Some((when, areas)) = &*known
+            && when.elapsed() < FRESH_FOR
+        {
+            return areas.clone();
+        }
+        let areas = ask_x().unwrap_or_default();
+        *known = Some((Instant::now(), areas.clone()));
+        areas
+    }
+
+    fn ask_x() -> Option<Vec<Area>> {
+        let xlib = Xlib::open().ok()?;
+        // The display is checked before use and closed at the end; the list
+        // of monitors is read within its given length, then freed.
+        unsafe {
+            let display = (xlib.XOpenDisplay)(std::ptr::null());
+            if display.is_null() {
+                return None;
+            }
+            let screen = (xlib.XDefaultScreen)(display);
+            let root = (xlib.XRootWindow)(display, screen);
+            let mut areas = Vec::new();
+            if let Ok(xrandr) = Xrandr::open() {
+                let mut count = 0;
+                let list = (xrandr.XRRGetMonitors)(display, root, 1, &mut count);
+                if !list.is_null() {
+                    for m in std::slice::from_raw_parts(list, count.max(0) as usize) {
+                        areas.push([m.x, m.y, m.x + m.width, m.y + m.height]);
+                    }
+                    (xrandr.XRRFreeMonitors)(list);
+                }
+            }
+            if areas.is_empty() {
+                let width = (xlib.XDisplayWidth)(display, screen);
+                let height = (xlib.XDisplayHeight)(display, screen);
+                areas.push([0, 0, width, height]);
+            }
+            (xlib.XCloseDisplay)(display);
+            Some(areas)
+        }
+    }
+
+    pub fn shows(area: Area) -> bool {
+        let monitors = monitors();
+        monitors.is_empty() || monitors.iter().any(|&m| super::overlap(m, area))
+    }
+
+    pub fn fits(area: Area) -> bool {
+        let monitors = monitors();
+        monitors.is_empty()
+            || monitors
+                .iter()
+                .any(|&m| super::contains([m[0], m[1], m[2], m[3] - PANEL], area))
+    }
+}
+
+/// Known not to run on a battery; unknown counts as a battery.
+#[cfg(windows)]
+pub fn has_no_battery() -> bool {
+    #[repr(C)]
+    #[derive(Default)]
+    struct PowerStatus {
+        ac_line: u8,
+        battery_flag: u8,
+        battery_percent: u8,
+        saver: u8,
+        battery_seconds: u32,
+        full_seconds: u32,
+    }
+    const NO_SYSTEM_BATTERY: u8 = 128;
+    const UNKNOWN: u8 = 255;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetSystemPowerStatus(status: *mut PowerStatus) -> i32;
+    }
+    let mut status = PowerStatus::default();
+    // Fills the structure given, of the layout the system documents.
+    let known = unsafe { GetSystemPowerStatus(&mut status) } != 0;
+    known && status.battery_flag != UNKNOWN && status.battery_flag & NO_SYSTEM_BATTERY != 0
+}
+
+#[cfg(not(windows))]
+pub fn has_no_battery() -> bool {
+    false
+}
+
+/// Whether the strip of a window placed there is on a monitor.
+pub fn shows(position: [f32; 2], size: [f32; 2]) -> bool {
+    platform::shows(strip(position, size))
+}
+
+/// Whether a new note placed there would be well within a monitor.
+pub fn fits(position: [f32; 2], _size: [f32; 2]) -> bool {
+    platform::fits(usable(position))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn areas_compare() {
+        let screen = [0, 0, 1000, 1000];
+        assert!(overlap(screen, [-500, 10, 10, 40]));
+        assert!(!overlap(screen, [1000, 10, 1200, 40]));
+        assert!(contains(screen, [10, 10, 210, 130]));
+        assert!(!contains(screen, [900, 10, 1100, 130]));
+    }
+
+    #[test]
+    fn a_wide_note_left_of_the_screen_still_counts_at_any_scale() {
+        // At 200%, a note of 280 points at x = -500 reaches x = 60.
+        let area = strip([-500.0, 10.0], [280.0, 200.0]);
+        assert!(overlap([0, 0, 1000, 1000], area));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_system_knows_what_is_on_screen() {
+        assert!(shows([100.0, 100.0], [280.0, 280.0]));
+        assert!(!shows([500000.0, 500000.0], [280.0, 280.0]));
+        assert!(fits([100.0, 100.0], [280.0, 280.0]));
+        assert!(!fits([500000.0, 500000.0], [280.0, 280.0]));
+    }
 }

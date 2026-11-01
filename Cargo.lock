@@ -2412,15 +2412,17 @@ dependencies = [
 
 [[package]]
 name = "papillon"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "eframe",
  "egui-phosphor",
  "egui_kittest",
  "fluent-bundle",
  "fluent-syntax",
+ "pollster",
  "serde",
  "serde_json",
+ "skrifa",
  "sys-locale",
  "winresource",
  "x11-dl",

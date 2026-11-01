@@ -22,7 +22,7 @@
       <li>A list to find, reopen and delete notes</li>
       <li xml:lang="fr">Une liste pour retrouver, rouvrir et supprimer les notes</li>
       <li>Starts with the computer if you wish</li>
-      <li xml:lang="fr">Démarre avec l'ordinateur si vous le souhaitez</li>
+      <li xml:lang="fr">Démarre avec l’ordinateur si vous le souhaitez</li>
     </ul>
   </description>
   <launchable type="desktop-id">io.github.Shhu.Papillon.desktop</launchable>
@@ -45,6 +45,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.1.2" date="2026-11-01">
+      <description>
+        <p>Notes can't crash the app or vanish through a damaged file or font: damaged values are repaired, any file not understood is first copied, and the previous version is kept. Autosave goes on when a note is minimized. Closing the list warns if saving fails. Complete licenses, keyboard access to long lists, more writing systems.</p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-11-01">
       <description>
         <p>Notes are safer: an unreadable file is never overwritten, and a failed save says so. A minimized note reopens from the list, typing goes on after a button, the scroll bar can be dragged, and notes can't get lost on a monitor that is gone. Keyboard moves, more writing systems, better contrast.</p>

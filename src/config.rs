@@ -2,7 +2,8 @@
 
 use std::path::PathBuf;
 
-/// `%APPDATA%\Papillon` on Windows, `~/.config/papillon` elsewhere.
+/// `%APPDATA%\Papillon` on Windows, else `papillon` in `$XDG_CONFIG_HOME` or
+/// `~/.config`.
 pub fn dir() -> PathBuf {
     // Tests never touch the user's settings.
     if cfg!(test) {

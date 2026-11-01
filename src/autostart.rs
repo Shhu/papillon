@@ -177,5 +177,8 @@ mod tests {
         assert_eq!(exec_value("/a%b").unwrap(), "\"/a%%b\"");
         assert_eq!(exec_value("/a$b").unwrap(), "\"/a\\\\$b\"");
         assert_eq!(exec_value("/a\nb"), None);
+        assert_eq!(exec_value("/a\"b").unwrap(), "\"/a\\\\\"b\"");
+        assert_eq!(exec_value("/a`b").unwrap(), "\"/a\\\\`b\"");
+        assert_eq!(exec_value("/a\\b").unwrap(), "\"/a\\\\\\\\b\"");
     }
 }

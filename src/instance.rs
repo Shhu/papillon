@@ -12,10 +12,10 @@ const WAITING: Duration = Duration::from_millis(1500);
 /// A request younger than this comes from a launch happening right now.
 const RECENT: Duration = Duration::from_secs(2);
 
-/// Held for as long as the app runs: the system frees the lock when it ends,
-/// even after a crash. Nothing when no lock is possible at all.
+/// Held for as long as the app runs: the system frees the locks when it ends,
+/// even after a crash. Empty when no lock is possible at all.
 pub struct Instance {
-    _lock: Option<File>,
+    _locks: Vec<File>,
 }
 
 fn lock_file() -> PathBuf {
@@ -26,11 +26,24 @@ fn request_file() -> PathBuf {
     crate::config::dir().join("show-request")
 }
 
+/// A second place to lock, for a settings folder that can't (read-only,
+/// network disk…). Private to the user, and shared by all runs of the app.
+fn fallback_lock_file() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return Some(std::env::temp_dir().join("papillon.lock"));
+    }
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?);
+    Some(match std::env::var_os("FLATPAK_ID") {
+        Some(id) => runtime.join("app").join(id).join("papillon.lock"),
+        None => runtime.join("papillon.lock"),
+    })
+}
+
 enum Attempt {
     Mine(File),
     /// Another Papillon holds it.
     Taken(File),
-    /// This place can't lock (read-only folder, network disk…).
+    /// This place can't lock.
     Impossible,
 }
 
@@ -50,49 +63,42 @@ fn try_lock(path: &Path) -> Attempt {
     }
 }
 
-/// The lock if no other Papillon runs; otherwise tells that one to show itself.
+/// The locks if no other Papillon runs; otherwise tells that one to show itself.
 pub fn acquire() -> Option<Instance> {
     let _ = fs::create_dir_all(crate::config::dir());
-    let attempt = match try_lock(&lock_file()) {
-        // Not in the settings folder, then: still one instance at a time, for
-        // this user, even if it can't be told to show itself.
-        Attempt::Impossible => {
-            let name = format!("papillon-{}.lock", user_name());
-            try_lock(&std::env::temp_dir().join(name))
+    let mut locks = Vec::new();
+    // Both places: an earlier launch may have managed with only one of them.
+    let mut places = vec![lock_file()];
+    places.extend(fallback_lock_file());
+    for place in places {
+        match try_lock(&place) {
+            Attempt::Mine(lock) => locks.push(lock),
+            Attempt::Taken(lock) => locks.push(ask_the_other(lock)?),
+            // Better notes that can't be protected than no notes at all.
+            Attempt::Impossible => {}
         }
-        attempt => attempt,
-    };
-    match attempt {
-        Attempt::Mine(lock) => {
-            discard_old_request();
-            Some(Instance { _lock: Some(lock) })
-        }
-        Attempt::Taken(lock) => ask_the_other(lock).map(|lock| Instance { _lock: Some(lock) }),
-        // Better notes that can't be protected than no notes at all.
-        Attempt::Impossible => Some(Instance { _lock: None }),
     }
-}
-
-fn user_name() -> String {
-    std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_default()
+    discard_old_request();
+    Some(Instance { _locks: locks })
 }
 
 /// A request left when nobody was running is out of date, but a launch
 /// happening at the same time as this one is waiting for an answer.
 fn discard_old_request() {
-    let age = fs::metadata(request_file())
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| SystemTime::now().duration_since(t).ok());
-    if age.is_some_and(|age| age > RECENT) {
+    let Ok(written) = fs::metadata(request_file()).and_then(|m| m.modified()) else {
+        return;
+    };
+    // From the future: the clock moved, so it says nothing about now.
+    let recent = SystemTime::now()
+        .duration_since(written)
+        .is_ok_and(|age| age <= RECENT);
+    if !recent {
         let _ = fs::remove_file(request_file());
     }
 }
 
-/// Leaves the request and waits for it to be taken. If the other one was
-/// quitting, its lock comes free: this launch takes over.
+/// Leaves the request and waits. If the other one was quitting, its lock comes
+/// free, even after it took the request: this launch takes over.
 fn ask_the_other(lock: File) -> Option<File> {
     let _ = fs::write(request_file(), "");
     let deadline = Instant::now() + WAITING;
@@ -101,11 +107,6 @@ fn ask_the_other(lock: File) -> Option<File> {
         if lock.try_lock().is_ok() {
             let _ = fs::remove_file(request_file());
             return Some(lock);
-        }
-        if !request_file().exists() {
-            // Taken, unless it was by a Papillon about to end.
-            std::thread::sleep(Duration::from_millis(300));
-            return lock.try_lock().is_ok().then_some(lock);
         }
     }
     None
@@ -121,4 +122,47 @@ pub fn watch(on_request: impl Fn() + Send + 'static) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_held_lock_is_taken_and_comes_free_when_dropped() {
+        let dir = std::env::temp_dir().join(format!("papillon-lock-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lock");
+        let Attempt::Mine(first) = try_lock(&path) else {
+            panic!("the first one gets it");
+        };
+        assert!(matches!(try_lock(&path), Attempt::Taken(_)));
+        drop(first);
+        assert!(matches!(try_lock(&path), Attempt::Mine(_)));
+        assert!(matches!(
+            try_lock(&dir.join("no-such-folder").join("lock")),
+            Attempt::Impossible
+        ));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_waiting_launch_takes_over_when_the_other_one_ends() {
+        let dir = std::env::temp_dir().join(format!("papillon-wait-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lock");
+        let Attempt::Mine(first) = try_lock(&path) else {
+            panic!("the first one gets it");
+        };
+        let Attempt::Taken(second) = try_lock(&path) else {
+            panic!("held by the first one");
+        };
+        let quitting = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(first);
+        });
+        assert!(ask_the_other(second).is_some());
+        quitting.join().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

@@ -49,16 +49,32 @@ fn main() -> eframe::Result {
     };
     // On Windows, Direct3D 12 rather than Vulkan: with Vulkan, resizing the
     // window can leave its surface stuck at the old size (seen on NVIDIA).
-    // OpenGL stays as a last resort for GPUs without D3D12.
+    // OpenGL only as a last resort, for GPUs without D3D12.
     #[cfg(windows)]
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
-        setup.instance_descriptor.backends =
-            eframe::wgpu::Backends::DX12 | eframe::wgpu::Backends::GL;
+        // Asked first: merely allowing OpenGL loads the graphics driver's
+        // OpenGL too, for nothing on most computers.
+        let mut descriptor = eframe::wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = eframe::wgpu::Backends::DX12;
+        let direct3d = eframe::wgpu::Instance::new(descriptor);
+        let adapters =
+            pollster::block_on(direct3d.enumerate_adapters(eframe::wgpu::Backends::DX12));
+        setup.instance_descriptor.backends = if adapters.is_empty() {
+            eframe::wgpu::Backends::DX12 | eframe::wgpu::Backends::GL
+        } else {
+            eframe::wgpu::Backends::DX12
+        };
     }
-    // Notes don't need the big graphics card of a laptop that has two.
+    // On battery power, notes don't need the big graphics card of a laptop that
+    // has two. On a desktop the big one drives the screen anyway: drawing there
+    // costs less, in memory and processor, than going through the other one.
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
-        setup.power_preference = eframe::wgpu::PowerPreference::from_env()
-            .unwrap_or(eframe::wgpu::PowerPreference::LowPower);
+        let preferred = if screens::has_no_battery() {
+            eframe::wgpu::PowerPreference::HighPerformance
+        } else {
+            eframe::wgpu::PowerPreference::LowPower
+        };
+        setup.power_preference = eframe::wgpu::PowerPreference::from_env().unwrap_or(preferred);
     }
     eframe::run_native(
         app::APP_NAME,

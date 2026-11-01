@@ -1,7 +1,7 @@
 //! The notes and their file. Saved shortly after each change, by replacing
 //! the file in one step, so that a crash or a power cut leaves either the old
-//! version or the new one, never half of it. What can't be read is never
-//! overwritten.
+//! version or the new one, never half of it. A file that can't be understood
+//! is first kept in a copy; one that can't be read at all isn't written over.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +26,15 @@ const RAISING: Duration = Duration::from_secs(1);
 const FIRST_POSITION: [f32; 2] = [80.0, 80.0];
 /// How far a new note lands from the previous one.
 const CASCADE: f32 = 32.0;
+/// No screen is larger: anything above comes from a damaged file, and X11
+/// can't even create such a window.
+const MAX_SIZE: f32 = 8000.0;
+/// Ids above this come from a damaged file; new notes count from the largest.
+const MAX_ID: u64 = 1 << 40;
+/// What a note holds in the file: anything else comes from another version.
+const NOTE_FIELDS: [&str; 8] = [
+    "id", "text", "color", "position", "size", "pinned", "open", "updated",
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -104,6 +113,9 @@ struct Saved {
     text_size: TextSize,
 }
 
+/// Emoji style selectors, of no use with one-color emoji.
+pub const SELECTORS: [char; 2] = ['\u{FE0E}', '\u{FE0F}'];
+
 /// Whether a window placed at this position, of this size, can be seen.
 pub type OnScreen = fn([f32; 2], [f32; 2]) -> bool;
 
@@ -126,6 +138,18 @@ pub struct State {
     raise_until: Option<Instant>,
     /// The note whose text gets the focus back, after a click on a button.
     pub refocus: Option<u64>,
+    /// The list's card that gets the keyboard focus back.
+    pub refocus_card: Option<u64>,
+    /// The question to delete was just asked: its safe answer takes the focus.
+    pub confirm_fresh: bool,
+    /// The list shows the license texts.
+    pub show_licenses: bool,
+    /// When input last reached a note, by egui's clock.
+    pub last_input: f64,
+    /// Scale each window was last seen at.
+    pub scales: HashMap<u64, f32>,
+    /// The system can hide the main window (not on pure Wayland).
+    pub cannot_hide: bool,
     /// Notes to take out of the taskbar, for the main window's pass.
     pub unminimize: Vec<u64>,
     /// Notes to move back on screen: their new position.
@@ -155,14 +179,21 @@ pub struct State {
     pub save_failed: bool,
     /// Tells whether a window can be seen; everything can, without it.
     pub on_screen: Option<OnScreen>,
-    /// Called from the writing thread when a write failed.
-    pub on_write_failed: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Tells whether a new window would be entirely within reach.
+    pub fits: Option<OnScreen>,
+    /// Called from the writing thread when a write failed or stops failing.
+    pub on_write_outcome: Option<Arc<dyn Fn() + Send + Sync>>,
     file: PathBuf,
     /// The last change not written yet, and the first one.
     changed: Option<Instant>,
     first_change: Option<Instant>,
-    /// Something changed since launch: an untouched file stays as it is.
+    /// Something changed since the last write: otherwise the file stays as it
+    /// is, whatever it holds.
     touched: bool,
+    /// The file was there at launch.
+    existed: bool,
+    /// The precautions before the first write are done.
+    guarded: bool,
     revision: u64,
     writer: Option<Writer>,
     outcome: Arc<WriterShared>,
@@ -178,7 +209,7 @@ fn load_from(file: PathBuf) -> State {
         file: file.clone(),
         ..Default::default()
     };
-    let bytes = match std::fs::read(&file) {
+    let bytes = match read_patiently(&file) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return state,
         // Locked, no permission, bad disk: it may well come back.
@@ -187,27 +218,87 @@ fn load_from(file: PathBuf) -> State {
             return state;
         }
     };
-    let saved = serde_json::from_slice::<Saved>(&bytes).unwrap_or_else(|_| {
-        // Never overwrite what can't be read: someone may rescue it. Copied,
+    state.existed = true;
+    make_private(&file);
+    let whole = expected_shape(&bytes)
+        .then(|| serde_json::from_slice::<Saved>(&bytes).ok())
+        .flatten();
+    let saved = whole.unwrap_or_else(|| {
+        // Never lose what can't be understood: someone may rescue it. Copied,
         // since a file held open by another program can't be renamed.
-        let copy = broken_name(&file);
-        match std::fs::write(&copy, &bytes) {
-            Ok(()) => state.set_aside = Some(copy),
-            Err(_) => state.protected = true,
+        match keep_copy(&file, &bytes) {
+            Some(copy) => state.set_aside = Some(copy),
+            None => state.protected = true,
         }
         salvage(&bytes)
     });
-    state.notes = saved.notes;
+    state.notes = sane_notes(saved.notes);
     state.text_size = saved.text_size;
     state
 }
 
+/// At the start of a session, antivirus or sync tools may hold the file.
+fn read_patiently(file: &Path) -> std::io::Result<Vec<u8>> {
+    let mut attempts = 0;
+    loop {
+        match std::fs::read(file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound && attempts < 3 => {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Whether the file holds just what this version writes. A list of notes under
+/// another name, or a field from a newer version, would otherwise vanish at
+/// the first save.
+fn expected_shape(bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let Some(top) = value.as_object() else {
+        return false;
+    };
+    let notes = top.get("notes").and_then(|n| n.as_array());
+    top.keys().all(|k| k == "notes" || k == "text_size")
+        && notes.is_some_and(|notes| {
+            notes.iter().all(|n| {
+                n.as_object()
+                    .is_some_and(|n| n.keys().all(|k| NOTE_FIELDS.contains(&k.as_str())))
+            })
+        })
+}
+
+/// The copy of an unreadable file; just one for the same content, launch
+/// after launch.
+fn keep_copy(file: &Path, bytes: &[u8]) -> Option<PathBuf> {
+    let dir = file.parent()?;
+    let same = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .find(|e| {
+            e.file_name().to_string_lossy().contains(".broken-")
+                && std::fs::read(e.path()).is_ok_and(|content| content == bytes)
+        });
+    if let Some(same) = same {
+        return Some(same.path());
+    }
+    let copy = broken_name(file);
+    write_private(&copy, bytes).ok()?;
+    Some(copy)
+}
+
 /// The notes that are still good in a file that isn't, one by one: a broken
-/// byte or a field from a newer version shouldn't cost all the others.
+/// byte, a cut end or a field from a newer version shouldn't cost the others.
 fn salvage(bytes: &[u8]) -> Saved {
     let text = String::from_utf8_lossy(bytes);
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Saved::default();
+        return Saved {
+            notes: notes_until_damage(&text),
+            text_size: TextSize::default(),
+        };
     };
     let notes = value
         .get("notes")
@@ -224,6 +315,55 @@ fn salvage(bytes: &[u8]) -> Saved {
         .and_then(|s| serde_json::from_value(s.clone()).ok())
         .unwrap_or_default();
     Saved { notes, text_size }
+}
+
+/// The notes at the start of a file that isn't JSON any more.
+fn notes_until_damage(text: &str) -> Vec<Note> {
+    let Some(start) = text.find("\"notes\"") else {
+        return Vec::new();
+    };
+    let Some(open) = text[start..].find('[') else {
+        return Vec::new();
+    };
+    let mut rest = &text[start + open + 1..];
+    let mut notes = Vec::new();
+    loop {
+        rest = rest.trim_start_matches([' ', '\n', '\r', '\t', ',']);
+        let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<Note>();
+        let Some(Ok(note)) = stream.next() else {
+            return notes;
+        };
+        notes.push(note);
+        rest = &rest[stream.byte_offset()..];
+    }
+}
+
+/// Values a window can be made from, whatever the file said.
+fn sane_notes(mut notes: Vec<Note>) -> Vec<Note> {
+    let mut seen = std::collections::HashSet::new();
+    notes.retain(|n| seen.insert(n.id));
+    let renumber = notes.iter().any(|n| n.id > MAX_ID);
+    for (i, note) in notes.iter_mut().enumerate() {
+        if renumber {
+            note.id = i as u64 + 1;
+        }
+        if !note.position.iter().all(|v| v.is_finite()) {
+            note.position = FIRST_POSITION;
+        }
+        for (i, value) in note.size.iter_mut().enumerate() {
+            *value = if value.is_finite() {
+                value.clamp(MIN_SIZE[i], MAX_SIZE)
+            } else {
+                DEFAULT_SIZE[i]
+            };
+        }
+        // Style selectors of emoji: invisible here, and invisible stops for
+        // the cursor.
+        if note.text.contains(SELECTORS) {
+            note.text = note.text.replace(SELECTORS, "");
+        }
+    }
+    notes
 }
 
 fn broken_name(file: &Path) -> PathBuf {
@@ -274,9 +414,10 @@ impl State {
             .and_then(|near| self.notes.iter().find(|n| n.id == near))
             .or_else(|| self.notes.iter().rfind(|n| n.open));
         let color = beside.map_or(Color::default(), |n| n.color);
+        let fits = self.fits;
         let position = beside
             .map(|n| [n.position[0] + CASCADE, n.position[1] + CASCADE])
-            .filter(|&p| self.shows(p, DEFAULT_SIZE))
+            .filter(|&p| fits.is_none_or(|f| f(p, DEFAULT_SIZE)))
             .unwrap_or(FIRST_POSITION);
         self.notes.push(Note {
             id,
@@ -342,6 +483,9 @@ impl State {
             self.delete(id);
         } else {
             self.confirming_delete = Some(id);
+            self.confirm_fresh = true;
+            // Both strips at once would leave no room for the text.
+            self.choosing_color = None;
         }
         empty
     }
@@ -349,6 +493,7 @@ impl State {
     fn window_gone(&mut self, id: u64) {
         self.spawned.remove(&id);
         self.placed.remove(&id);
+        self.scales.remove(&id);
         self.relocate.remove(&id);
         self.forgotten.push(id);
         if self.raise == Some(id) {
@@ -375,9 +520,13 @@ impl State {
             .find(|n| n.id == id)
             .is_some_and(|n| !self.shows(n.position, n.size));
         if let Some(note) = self.note_mut(id) {
-            note.open = true;
+            let was_open = std::mem::replace(&mut note.open, true);
             if lost {
                 note.position = FIRST_POSITION;
+                // Its window, if it has one, is out of sight too.
+                if was_open {
+                    self.relocate.insert(id, FIRST_POSITION);
+                }
             }
         }
         self.ask_raise(id);
@@ -431,6 +580,9 @@ impl State {
     ) -> Option<[f32; 2]> {
         // One last pass of a window on its way out.
         let note = self.notes.iter().find(|n| n.id == id && n.open)?;
+        if !position.iter().chain(&size).all(|v| v.is_finite()) {
+            return None;
+        }
         let Some(placed) = self.placed.get_mut(&id) else {
             let target = note.position;
             self.placed.insert(
@@ -503,7 +655,7 @@ impl State {
             Writer::start(
                 self.file.clone(),
                 self.outcome.clone(),
-                self.on_write_failed.clone(),
+                self.on_write_outcome.clone(),
             )
         });
         let _ = writer.sender.send((generation, content));
@@ -512,7 +664,10 @@ impl State {
     /// What the writing thread last reported.
     fn collect_outcome(&mut self) {
         match self.outcome.status.swap(WRITE_NONE, Ordering::SeqCst) {
-            WRITE_OK => self.save_failed = false,
+            WRITE_OK => {
+                self.save_failed = false;
+                self.quit_anyway = false;
+            }
             WRITE_FAILED => self.write_failed(),
             _ => {}
         }
@@ -533,7 +688,7 @@ impl State {
     /// writing thread. False if they couldn't be.
     pub fn save(&mut self) -> bool {
         if !self.touched {
-            return true;
+            return !self.save_failed;
         }
         let Some(content) = self.serialize() else {
             return false;
@@ -545,13 +700,45 @@ impl State {
             write_file(&self.file, &content).is_ok()
         };
         if written {
+            self.touched = false;
             self.save_failed = false;
+            self.quit_anyway = false;
             self.changed = None;
             self.first_change = None;
         } else {
             self.write_failed();
         }
         written
+    }
+
+    /// Saves before quitting. True if it may go on; otherwise says why first,
+    /// and quitting again goes through.
+    pub fn try_quit(&mut self) -> bool {
+        if self.save() || self.quit_anyway {
+            return true;
+        }
+        self.quit = false;
+        self.quit_anyway = true;
+        self.show_list = true;
+        false
+    }
+
+    /// Before writing for the first time in this session: the previous version
+    /// is kept, and a file that appeared since launch (a folder that wasn't
+    /// mounted yet) isn't replaced by an empty start.
+    fn guard_first_write(&mut self) {
+        if std::mem::replace(&mut self.guarded, true) {
+            return;
+        }
+        let Ok(bytes) = std::fs::read(&self.file) else {
+            return;
+        };
+        if self.existed {
+            let _ = write_private(&self.file.with_extension("json.bak"), &bytes);
+        } else if let Some(copy) = keep_copy(&self.file, &bytes) {
+            self.set_aside = Some(copy);
+            self.show_list = true;
+        }
     }
 
     /// The file's future content, or nothing if it must not be written.
@@ -562,11 +749,16 @@ impl State {
             text_size: TextSize,
         }
         if self.protected {
+            // Said again at the first edit: the list may be hidden by then.
+            if !self.save_failed {
+                self.show_list = true;
+            }
             self.save_failed = true;
             self.changed = None;
             self.first_change = None;
             return None;
         }
+        self.guard_first_write();
         serde_json::to_vec_pretty(&Saving {
             notes: &self.notes,
             text_size: self.text_size,
@@ -577,15 +769,33 @@ impl State {
     /// Notes in the list's order, most recently changed first, those matching
     /// `search` only.
     pub fn listed(&self) -> Vec<u64> {
-        let search = self.search.trim().to_lowercase();
+        let search = fold(self.search.trim());
         let mut notes: Vec<&Note> = self
             .notes
             .iter()
-            .filter(|n| search.is_empty() || n.text.to_lowercase().contains(&search))
+            .filter(|n| search.is_empty() || fold(&n.text).contains(&search))
             .collect();
         notes.sort_by_key(|n| (std::cmp::Reverse(n.updated), std::cmp::Reverse(n.id)));
         notes.into_iter().map(|n| n.id).collect()
     }
+}
+
+/// For searching: "cafe" finds "Café".
+fn fold(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'à' | 'â' | 'ä' | 'á' | 'ã' | 'å' => 'a',
+            'ç' => 'c',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'î' | 'ï' | 'í' | 'ì' => 'i',
+            'ñ' => 'n',
+            'ô' | 'ö' | 'ó' | 'ò' | 'õ' => 'o',
+            'ù' | 'û' | 'ü' | 'ú' => 'u',
+            'ÿ' | 'ý' => 'y',
+            c => c,
+        })
+        .collect()
 }
 
 impl Note {
@@ -596,8 +806,8 @@ impl Note {
     }
 }
 
-/// A poisoned lock only says another thread panicked: the data is still the
-/// best there is, and the notes still deserve saving.
+/// A lock whose holder panicked, in builds that unwind (the tests): the data
+/// is still the best there is. Release builds abort on panic.
 pub fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -624,28 +834,60 @@ impl Writer {
     fn start(
         file: PathBuf,
         shared: Arc<WriterShared>,
-        on_failed: Option<Arc<dyn Fn() + Send + Sync>>,
+        on_outcome: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> Self {
         let (sender, receiver) = channel::<(u64, Vec<u8>)>();
         std::thread::spawn(move || {
+            let mut failing = false;
             while let Ok(mut job) = receiver.recv() {
                 while let Ok(newer) = receiver.try_recv() {
                     job = newer;
                 }
-                let _file = lock(&shared.file);
-                if job.0 < shared.latest.load(Ordering::SeqCst) {
+                let Some(ok) = write_job(&shared, &file, job.0, &job.1) else {
                     continue;
+                };
+                // Failing, or no longer: the list has something to say.
+                if let (true, Some(on_outcome)) = (!ok || failing, &on_outcome) {
+                    on_outcome();
                 }
-                let ok = write_file(&file, &job.1).is_ok();
-                let status = if ok { WRITE_OK } else { WRITE_FAILED };
-                shared.status.store(status, Ordering::SeqCst);
-                if let (false, Some(on_failed)) = (ok, &on_failed) {
-                    on_failed();
-                }
+                failing = !ok;
             }
         });
         Self { sender }
     }
+}
+
+/// Writes this version of the notes unless a newer one exists; whether it
+/// worked, if it was written.
+fn write_job(shared: &WriterShared, file: &Path, generation: u64, content: &[u8]) -> Option<bool> {
+    let _file = lock(&shared.file);
+    if generation < shared.latest.load(Ordering::SeqCst) {
+        return None;
+    }
+    let ok = write_file(file, content).is_ok();
+    let status = if ok { WRITE_OK } else { WRITE_FAILED };
+    shared.status.store(status, Ordering::SeqCst);
+    Some(ok)
+}
+
+/// Notes are private, whatever the system's defaults.
+fn make_private(file: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600));
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+}
+
+fn write_private(file: &Path, content: &[u8]) -> std::io::Result<()> {
+    std::fs::write(file, content)?;
+    make_private(file);
+    Ok(())
 }
 
 fn write_file(file: &Path, content: &[u8]) -> std::io::Result<()> {
@@ -836,17 +1078,187 @@ mod tests {
         assert_eq!(std::fs::read(dir.file()).unwrap(), b"{ not json");
     }
 
-    /// Reading a folder fails with something else than "not found".
     #[test]
     fn a_file_that_cannot_be_read_is_never_written_over() {
         let dir = TempDir::new("protected");
-        std::fs::create_dir(dir.file()).unwrap();
-        let mut state = load_from(dir.file());
-        assert!(state.protected);
+        std::fs::write(dir.file(), "precious").unwrap();
+        let mut state = load_from(dir.0.join("elsewhere.json"));
+        state.file = dir.file();
+        state.protected = true;
         state.create(None);
         assert!(!state.save());
         assert!(state.save_failed);
-        assert!(dir.file().is_dir());
+        assert!(state.show_list, "said even if the list was hidden");
+        assert_eq!(std::fs::read(dir.file()).unwrap(), b"precious");
+    }
+
+    #[test]
+    fn a_read_error_protects_the_file() {
+        // Reading a folder fails with something else than "not found".
+        let dir = TempDir::new("read-error");
+        std::fs::create_dir(dir.file()).unwrap();
+        assert!(load_from(dir.file()).protected);
+    }
+
+    #[test]
+    fn valid_json_of_another_shape_is_kept_aside() {
+        for content in [r#"{"version":2,"items":[{"text":"a"}]}"#, "[]"] {
+            let dir = TempDir::new("shape");
+            std::fs::write(dir.file(), content).unwrap();
+            let mut state = load_from(dir.file());
+            assert!(state.set_aside.is_some(), "{content}");
+            state.create(None);
+            state.save();
+            assert_eq!(dir.kept_copy().unwrap(), content.as_bytes());
+        }
+    }
+
+    #[test]
+    fn a_field_from_a_newer_version_is_kept_aside_but_the_note_comes_through() {
+        let dir = TempDir::new("field");
+        let content = r#"{"notes":[{"id":1,"text":"a","position":[1,2],"size":[300,300],"attachments":[1]}]}"#;
+        std::fs::write(dir.file(), content).unwrap();
+        let state = load_from(dir.file());
+        assert_eq!(state.notes.len(), 1);
+        assert_eq!(dir.kept_copy().unwrap(), content.as_bytes());
+    }
+
+    #[test]
+    fn a_cut_file_gives_back_the_notes_before_the_cut() {
+        let dir = TempDir::new("cut");
+        let mut state = load_from(dir.file());
+        for text in ["un", "deux", "trois"] {
+            let id = state.create(None);
+            state.note_mut(id).unwrap().text = text.into();
+        }
+        state.save();
+        let bytes = std::fs::read(dir.file()).unwrap();
+        std::fs::write(dir.file(), &bytes[..bytes.len() - 60]).unwrap();
+        let state = load_from(dir.file());
+        assert_eq!(state.notes.len(), 2);
+        assert_eq!(state.notes[1].text, "deux");
+    }
+
+    #[test]
+    fn launching_again_makes_no_second_copy() {
+        let dir = TempDir::new("one-copy");
+        std::fs::write(dir.file(), "{ not json").unwrap();
+        let first = load_from(dir.file()).set_aside;
+        let second = load_from(dir.file()).set_aside;
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn the_previous_version_is_kept_at_the_first_write() {
+        let dir = TempDir::new("bak");
+        let mut state = load_from(dir.file());
+        state.create(None);
+        state.save();
+        let before = std::fs::read(dir.file()).unwrap();
+        let mut state = load_from(dir.file());
+        state.create(None);
+        state.save();
+        assert_eq!(std::fs::read(dir.0.join("notes.json.bak")).unwrap(), before);
+    }
+
+    #[test]
+    fn a_file_that_appears_after_launch_is_kept() {
+        let dir = TempDir::new("appears");
+        let mut state = load_from(dir.file());
+        std::fs::write(dir.file(), "the real notes").unwrap();
+        state.create(None);
+        state.save();
+        assert_eq!(dir.kept_copy().unwrap(), b"the real notes");
+        assert!(state.show_list);
+    }
+
+    #[test]
+    fn damaged_values_become_values_a_window_can_have() {
+        let dir = TempDir::new("values");
+        std::fs::write(
+            dir.file(),
+            r#"{"notes":[
+                {"id":1,"text":"a","position":[1e39,2],"size":[70000,1e39]},
+                {"id":1,"text":"twin","position":[1,2],"size":[1,1]},
+                {"id":18446744073709551615,"text":"b️","position":[1,2],"size":[300,300]}
+            ]}"#,
+        )
+        .unwrap();
+        let mut state = load_from(dir.file());
+        assert_eq!(state.notes.len(), 2);
+        assert_eq!(state.notes[0].position, FIRST_POSITION);
+        assert_eq!(state.notes[0].size, [MAX_SIZE, DEFAULT_SIZE[1]]);
+        assert_eq!(state.notes[1].text, "b");
+        assert_eq!(state.create(None), 3, "ids stay far from overflowing");
+    }
+
+    #[test]
+    fn every_field_written_is_a_known_one() {
+        let mut state = State::default();
+        let id = state.create(None);
+        let note = state.notes.iter().find(|n| n.id == id).unwrap();
+        let value = serde_json::to_value(note).unwrap();
+        let keys = value.as_object().unwrap().keys();
+        assert!(keys.into_iter().all(|k| NOTE_FIELDS.contains(&k.as_str())));
+    }
+
+    #[test]
+    fn an_older_version_is_not_written_over_a_newer_one() {
+        let dir = TempDir::new("generation");
+        let shared = WriterShared::default();
+        shared.latest.store(5, Ordering::SeqCst);
+        assert_eq!(write_job(&shared, &dir.file(), 4, b"old"), None);
+        assert!(!dir.file().exists());
+        assert_eq!(write_job(&shared, &dir.file(), 5, b"new"), Some(true));
+        assert_eq!(std::fs::read(dir.file()).unwrap(), b"new");
+    }
+
+    #[test]
+    fn quitting_warns_once_then_goes_through_and_a_good_save_resets_it() {
+        let dir = TempDir::new("quit");
+        std::fs::write(dir.0.join("in-the-way"), "").unwrap();
+        let mut state = load_from(dir.file());
+        state.file = dir.0.join("in-the-way").join("notes.json");
+        state.create(None);
+        state.quit = true;
+        assert!(!state.try_quit());
+        assert!(!state.quit && state.show_list);
+        assert!(state.try_quit());
+        state.file = dir.file();
+        assert!(state.save());
+        assert!(!state.quit_anyway);
+    }
+
+    #[test]
+    fn saving_twice_writes_once() {
+        let dir = TempDir::new("once");
+        let mut state = load_from(dir.file());
+        state.create(None);
+        assert!(state.save());
+        std::fs::write(dir.file(), "changed outside").unwrap();
+        assert!(state.save());
+        assert_eq!(std::fs::read(dir.file()).unwrap(), b"changed outside");
+    }
+
+    #[test]
+    fn search_ignores_accents() {
+        let mut state = State::default();
+        let id = state.create(None);
+        state.note_mut(id).unwrap().text = "Un Café".into();
+        state.search = "cafe".into();
+        assert_eq!(state.listed(), vec![id]);
+    }
+
+    #[test]
+    fn opening_a_lost_open_note_moves_its_window() {
+        let mut state = State {
+            on_screen: Some(|p, _| p[0] < 1000.0),
+            ..Default::default()
+        };
+        let id = state.create(None);
+        state.note_mut(id).unwrap().position = [5000.0, 0.0];
+        state.open(id);
+        assert_eq!(state.relocate.get(&id), Some(&FIRST_POSITION));
     }
 
     #[test]
@@ -903,6 +1315,11 @@ mod tests {
         state.touch();
         state.save_if_due();
         assert!(!state.has_unsaved());
+        // Before the folder goes: the thread is writing there.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !dir.file().exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[cfg(unix)]
@@ -965,6 +1382,7 @@ mod tests {
     fn notes_never_land_out_of_sight() {
         let mut state = State {
             on_screen: Some(|p, _| p[0] < 1000.0),
+            fits: Some(|p, _| p[0] < 1000.0),
             ..Default::default()
         };
         let first = state.create(None);

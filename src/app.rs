@@ -47,13 +47,16 @@ impl App {
         crate::autostart::refresh();
         state.autostart = crate::autostart::is_enabled();
         state.on_screen = Some(crate::screens::shows);
+        state.fits = Some(crate::screens::fits);
+        // Without X11, nothing can hide the main window.
+        state.cannot_hide = !cfg!(windows) && std::env::var_os("DISPLAY").is_none();
         state.rescue_lost();
         // The list also has to say when something is wrong with the notes.
         let problem = state.protected || state.set_aside.is_some();
-        state.list_visible = problem || !state.notes.iter().any(|n| n.open);
+        state.list_visible = problem || state.cannot_hide || !state.notes.iter().any(|n| n.open);
         let hiding_passes = if state.list_visible { 0 } else { HIDING_PASSES };
         let woken = ctx.clone();
-        state.on_write_failed = Some(Arc::new(move || {
+        state.on_write_outcome = Some(Arc::new(move || {
             woken.request_repaint_of(ViewportId::ROOT);
         }));
         let shared: Shared = Arc::new(Mutex::new(state));
@@ -100,9 +103,65 @@ impl App {
             ctx.send_viewport_cmd_to(viewport, ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd_to(viewport, ViewportCommand::Focus);
         }
+        // Likewise for a window out of sight. In physical pixels, like what's
+        // saved; the scale is its own, and it's unknown until it exists.
+        let moving: Vec<(u64, [f32; 2])> = state.relocate.iter().map(|(k, v)| (*k, *v)).collect();
+        for (id, position) in moving {
+            let viewport = note::viewport_id(id);
+            let scale = ctx.input(|i| {
+                let info = i.raw.viewports.get(&viewport)?;
+                info.native_pixels_per_point
+            });
+            if let Some(scale) = scale {
+                let points = egui::Vec2::from(position) / scale;
+                ctx.send_viewport_cmd_to(viewport, ViewportCommand::Maximized(false));
+                ctx.send_viewport_cmd_to(
+                    viewport,
+                    ViewportCommand::OuterPosition(points.to_pos2()),
+                );
+                state.relocate.remove(&id);
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(50));
+            }
+        }
         for id in std::mem::take(&mut state.forgotten) {
-            let text = egui::Id::new(("note-text", id));
-            ctx.data_mut(|d| d.remove::<TextEditState>(text));
+            ctx.data_mut(|d| d.remove::<TextEditState>(note::text_id(id)));
+        }
+    }
+
+    /// Close asked of a window: here, since this runs even when everything is
+    /// minimized and no window gets a pass of its own.
+    fn handle_close(&mut self, ctx: &egui::Context, state: &mut State) {
+        let asked = |viewport| {
+            ctx.input(|i| {
+                i.raw
+                    .viewports
+                    .get(&viewport)
+                    .is_some_and(|info| info.close_requested())
+            })
+        };
+        let closing: Vec<u64> = state
+            .notes
+            .iter()
+            .filter(|n| n.open && asked(note::viewport_id(n.id)))
+            .map(|n| n.id)
+            .collect();
+        for id in closing {
+            state.close(id);
+        }
+        if !ctx.input(|i| i.viewport().close_requested()) || state.quit {
+            return;
+        }
+        ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+        if !state.notes.iter().any(|n| n.open) {
+            // Through the same door as the menu, which warns if saving fails.
+            state.quit = true;
+        } else if state.cannot_hide {
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+        } else {
+            // With notes on the desktop, closing the list only hides it.
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            state.list_visible = false;
         }
     }
 
@@ -134,15 +193,10 @@ impl eframe::App for App {
         let shared = self.shared.clone();
         let mut guard = store::lock(&shared);
         let state = &mut *guard;
-        if state.quit {
-            // Not without saying so, if the notes can't be saved.
-            if state.save() || state.quit_anyway {
-                ctx.send_viewport_cmd(ViewportCommand::Close);
-                return;
-            }
-            state.quit = false;
-            state.quit_anyway = true;
-            state.show_list = true;
+        self.handle_close(ctx, state);
+        if state.quit && state.try_quit() {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return;
         }
         self.show_list(ctx, state);
         if self.hiding_passes > 0 {
@@ -160,14 +214,6 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let shared = self.shared.clone();
         let mut state = store::lock(&shared);
-        if ui.ctx().input(|i| i.viewport().close_requested()) && !state.quit {
-            // With notes on the desktop, closing the list only hides it.
-            if state.notes.iter().any(|n| n.open) {
-                ui.ctx().send_viewport_cmd(ViewportCommand::CancelClose);
-                ui.ctx().send_viewport_cmd(ViewportCommand::Visible(false));
-                state.list_visible = false;
-            }
-        }
         // This pass also runs while hidden, to keep the notes' windows going.
         if state.list_visible {
             crate::hub::ui(ui, &mut state);
@@ -331,8 +377,9 @@ mod tests {
     #[test]
     fn a_second_click_on_the_list_trash_does_not_delete() {
         let mut harness = list_harness(&["Ne pas perdre"]);
-        let trash = harness.get_by_label(&t!("note-delete")).rect().center();
-        harness.get_by_label(&t!("note-delete")).click();
+        let name = format!("{} Ne pas perdre", t!("note-delete"));
+        let trash = harness.get_by_label(&name).rect().center();
+        harness.get_by_label(&name).click();
         harness.run_steps(2);
         assert_eq!(harness.state().confirming_delete, Some(1));
         let keep = harness.get_by_label(&t!("delete-no")).rect();
@@ -347,7 +394,8 @@ mod tests {
     #[test]
     fn empty_notes_go_at_once_from_the_list_too() {
         let mut harness = list_harness(&[""]);
-        harness.get_by_label(&t!("note-delete")).click();
+        let name = format!("{} {}", t!("note-delete"), t!("note-empty"));
+        harness.get_by_label(&name).click();
         harness.run_steps(2);
         assert!(harness.state().notes.is_empty());
     }
@@ -376,10 +424,159 @@ mod tests {
     }
 
     #[test]
-    fn hidden_text_styles_do_not_move_the_text() {
-        let mut harness = note_harness("a\u{FE0F}b");
-        type_in_note(&mut harness, "c");
-        assert!(harness.state().notes[0].text.contains('\u{FE0F}'));
+    fn typing_dates_the_note_so_it_rises_in_the_list() {
+        let mut harness = note_harness("");
+        harness.state_mut().notes[0].updated = 0;
+        type_in_note(&mut harness, "x");
+        assert!(harness.state().notes[0].updated > 0);
+    }
+
+    #[test]
+    fn emoji_selectors_typed_stay_out_of_the_note() {
+        let mut harness = note_harness("");
+        type_in_note(&mut harness, "❤\u{FE0F}b");
+        assert_eq!(harness.state().notes[0].text, "❤b");
+    }
+
+    #[test]
+    fn tab_in_the_text_inserts_a_tab() {
+        let mut harness = note_harness("");
+        type_in_note(&mut harness, "a");
+        harness.key_press(egui::Key::Tab);
+        harness.run_steps(2);
+        assert_eq!(harness.state().notes[0].text, "a\t");
+    }
+
+    #[test]
+    fn the_strip_is_not_a_stop_for_the_tab_key_and_its_buttons_come_in_order() {
+        let mut harness = note_harness("x");
+        harness.key_press(egui::Key::Tab);
+        harness.run_steps(2);
+        assert!(harness.get_by_label(&t!("note-new")).is_focused());
+    }
+
+    /// A note's whole window, for its shortcuts.
+    fn window_harness(text: &str) -> (Shared, egui_kittest::Harness<'static>) {
+        let mut state = State::default();
+        let id = state.create(None);
+        state.note_mut(id).expect("just created").text = text.into();
+        state.raise = None;
+        let shared: Shared = Arc::new(Mutex::new(state));
+        let (driven, mut fonts_ready) = (shared.clone(), false);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size([300.0, 300.0])
+            .build_ui(move |ui| {
+                if !fonts_ready {
+                    theme::install(ui.ctx());
+                    fonts_ready = true;
+                    return;
+                }
+                note::window(ui, &driven, id);
+            });
+        harness.run_steps(3);
+        (shared, harness)
+    }
+
+    #[test]
+    fn ctrl_n_makes_a_note_and_ctrl_w_closes_this_one() {
+        let (shared, mut harness) = window_harness("x");
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::N);
+        harness.run_steps(2);
+        assert_eq!(store::lock(&shared).notes.len(), 2);
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::W);
+        harness.run_steps(2);
+        assert!(!store::lock(&shared).notes[0].open);
+    }
+
+    #[test]
+    fn ctrl_n_in_the_list_makes_a_note_in_sight() {
+        let mut harness = list_harness(&["x"]);
+        harness.state_mut().search = "nothing like it".into();
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::N);
+        harness.run_steps(2);
+        assert_eq!(harness.state().notes.len(), 2);
+        assert!(harness.state().search.is_empty());
+    }
+
+    #[test]
+    fn the_delete_key_on_a_card_asks_first() {
+        let mut harness = list_harness(&["Courses"]);
+        harness.get_by_label("Courses").focus();
+        harness.run_steps(2);
+        harness.key_press(egui::Key::Delete);
+        harness.run_steps(2);
+        assert_eq!(harness.state().confirming_delete, Some(1));
+        assert_eq!(harness.state().notes.len(), 1);
+        assert!(harness.get_by_label(&t!("delete-no")).is_focused());
+    }
+
+    #[test]
+    fn keeping_a_note_gives_the_focus_back_to_its_card() {
+        let mut harness = list_harness(&["Courses"]);
+        harness.get_by_label("Courses").focus();
+        harness.run_steps(2);
+        harness.key_press(egui::Key::Delete);
+        harness.run_steps(2);
+        harness.get_by_label(&t!("delete-no")).click();
+        harness.run_steps(3);
+        assert!(harness.get_by_label("Courses").is_focused());
+    }
+
+    #[test]
+    fn the_keyboard_reaches_every_card_of_a_long_list() {
+        let texts: Vec<String> = (0..40).map(|i| format!("note {i}")).collect();
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let mut harness = list_harness(&texts);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            harness.key_press(egui::Key::Tab);
+            harness.run_steps(3);
+            for i in 0..40 {
+                let name = format!("note {i}");
+                if harness
+                    .query_by_label(&name)
+                    .is_some_and(|node| node.is_focused())
+                {
+                    seen.insert(i);
+                }
+            }
+        }
+        assert_eq!(seen.len(), 40, "reached: {seen:?}");
+    }
+
+    #[test]
+    fn the_focus_follows_the_note_when_a_search_moves_the_rows() {
+        let mut harness = list_harness(&["note 1", "note 2", "note 11"]);
+        harness.get_by_label("note 2").focus();
+        harness.run_steps(2);
+        harness.state_mut().search = "note 2".into();
+        harness.run_steps(2);
+        assert!(harness.get_by_label("note 2").is_focused());
+    }
+
+    #[test]
+    fn banners_give_the_path_of_the_copy() {
+        let mut harness = list_harness(&["x"]);
+        harness.state_mut().set_aside = Some("/tmp/copy.json".into());
+        harness.run_steps(2);
+        assert!(
+            harness
+                .query_all_by_label_contains("/tmp/copy.json")
+                .next()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn the_licenses_show_in_the_list_and_name_what_is_built_in() {
+        assert!(LICENSES.contains("Emil Ernerfeldt"));
+        assert!(LICENSES.contains("Ubuntu Font Licence"));
+        let mut harness = list_harness(&["x"]);
+        harness.state_mut().show_licenses = true;
+        harness.run_steps(2);
+        harness.get_by_label(&t!("licenses-back")).click();
+        harness.run_steps(2);
+        assert!(!harness.state().show_licenses);
     }
 
     /// A desktop with notes and the list, made of the real pieces, for the

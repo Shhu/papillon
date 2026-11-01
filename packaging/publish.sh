@@ -30,6 +30,9 @@ if tagged=$(git rev-parse -q --verify "refs/tags/$tag^{commit}"); then
     [ "$tagged" = "$(git rev-parse HEAD)" ] || { echo "$tag points to another commit"; exit 1; }
 fi
 
+# The website first: the Flatpak's catalog downloads its picture from there.
+git push origin main
+
 packaging/windows/build.sh
 packaging/flatpak/build.sh
 out=$(mktemp -d)
