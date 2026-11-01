@@ -1,7 +1,7 @@
 # A note
 note-new = Nouvelle note
 note-list = Toutes les notes
-note-close = Fermer (reste dans la liste)
+note-close = Fermer (une note écrite reste dans la liste)
 note-delete = Supprimer…
 note-pin = Garder au premier plan
 note-unpin = Ne plus garder au premier plan

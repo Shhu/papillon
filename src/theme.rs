@@ -60,7 +60,7 @@ pub const LIGHT: Palette = Palette {
     muted: rgb(0x576070),
     faint: rgb(0x6B7280),
     accent: rgb(0xFFD84D),
-    accent_soft: rgba(0xE0, 0xB0, 0x10, 0.20),
+    accent_soft: rgba(0xE0, 0xB0, 0x10, 0.45),
     // The accent darkened to stand out on white.
     accent_ink: rgb(0x8A6A00),
     on_accent: rgb(0x2B2308),
@@ -198,9 +198,9 @@ fn style(style: &mut egui::Style, p: &Palette) {
     s.menu_margin = Margin::same(6);
     s.scroll.bar_width = 6.0;
     s.scroll.floating = false;
-    s.scroll.dormant_handle_opacity = 0.3;
-    s.scroll.active_handle_opacity = 0.45;
-    s.scroll.interact_handle_opacity = 0.6;
+    s.scroll.dormant_handle_opacity = 0.6;
+    s.scroll.active_handle_opacity = 0.75;
+    s.scroll.interact_handle_opacity = 0.9;
     s.scroll.dormant_background_opacity = 0.0;
     s.scroll.active_background_opacity = 0.0;
     s.scroll.interact_background_opacity = 0.0;
@@ -218,7 +218,7 @@ fn style(style: &mut egui::Style, p: &Palette) {
     v.window_stroke = Stroke::new(1.0, p.line);
     v.menu_corner_radius = CornerRadius::same(10);
     v.selection.bg_fill = p.accent_soft;
-    v.selection.stroke = Stroke::new(1.0, p.accent_ink);
+    v.selection.stroke = Stroke::new(1.0, p.text);
     v.text_cursor.stroke = Stroke::new(2.0, p.accent_ink);
 
     let radius = CornerRadius::same(8);
@@ -230,9 +230,9 @@ fn style(style: &mut egui::Style, p: &Palette) {
     w.noninteractive.corner_radius = radius;
     for (state, fill, stroke, text) in [
         (&mut w.inactive, p.surface, p.control_line, p.text),
-        (&mut w.hovered, p.raised, p.line, p.text),
+        (&mut w.hovered, p.raised, p.control_line, p.text),
         (&mut w.active, p.raised, p.accent_ink, p.text),
-        (&mut w.open, p.raised, p.line, p.text),
+        (&mut w.open, p.raised, p.control_line, p.text),
     ] {
         state.bg_fill = fill;
         state.weak_bg_fill = fill;
@@ -291,7 +291,17 @@ pub fn glyph_button(
     if on || response.hovered() {
         ui.painter().rect_filled(rect, 6.0, hover_fill);
     }
-    focus_ring(ui, rect, &response, color);
+    // "On" must show otherwise than by a color close to the background.
+    if on {
+        ui.painter()
+            .rect_stroke(rect, 6.0, Stroke::new(1.0, color), egui::StrokeKind::Inside);
+    }
+    focus_ring(
+        ui,
+        rect.shrink(if on { 2.0 } else { 0.0 }),
+        &response,
+        color,
+    );
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,

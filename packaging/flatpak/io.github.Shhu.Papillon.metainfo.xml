@@ -45,6 +45,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.1.3" date="2026-11-01">
+      <description>
+        <p>Safer backups: a damaged file never replaces a good one, twin notes are kept, a file changed by another program is copied first. A long note keeps its place when its strip is clicked. Fonts appear without waiting, and a trapped font can't crash the app. Keyboard access backwards through long lists and in the licenses.</p>
+      </description>
+    </release>
     <release version="0.1.2" date="2026-11-01">
       <description>
         <p>Notes can't crash the app or vanish through a damaged file or font: damaged values are repaired, any file not understood is first copied, and the previous version is kept. Autosave goes on when a note is minimized. Closing the list warns if saving fails. Complete licenses, keyboard access to long lists, more writing systems.</p>

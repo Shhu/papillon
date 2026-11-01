@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 /// How long a later launch waits for the first one: it may be quitting.
-const WAITING: Duration = Duration::from_millis(1500);
+const WAITING: Duration = Duration::from_secs(3);
 /// A request younger than this comes from a launch happening right now.
 const RECENT: Duration = Duration::from_secs(2);
 
@@ -16,6 +16,9 @@ const RECENT: Duration = Duration::from_secs(2);
 /// even after a crash. Empty when no lock is possible at all.
 pub struct Instance {
     _locks: Vec<File>,
+    /// This launch was asking the one before it, which was quitting: it owes
+    /// the user the list they asked for.
+    pub asked_for_list: bool,
 }
 
 fn lock_file() -> PathBuf {
@@ -67,19 +70,26 @@ fn try_lock(path: &Path) -> Attempt {
 pub fn acquire() -> Option<Instance> {
     let _ = fs::create_dir_all(crate::config::dir());
     let mut locks = Vec::new();
+    let mut asked_for_list = false;
     // Both places: an earlier launch may have managed with only one of them.
     let mut places = vec![lock_file()];
     places.extend(fallback_lock_file());
     for place in places {
         match try_lock(&place) {
             Attempt::Mine(lock) => locks.push(lock),
-            Attempt::Taken(lock) => locks.push(ask_the_other(lock)?),
+            Attempt::Taken(lock) => {
+                locks.push(ask_the_other(lock)?);
+                asked_for_list = true;
+            }
             // Better notes that can't be protected than no notes at all.
             Attempt::Impossible => {}
         }
     }
     discard_old_request();
-    Some(Instance { _locks: locks })
+    Some(Instance {
+        _locks: locks,
+        asked_for_list,
+    })
 }
 
 /// A request left when nobody was running is out of date, but a launch
@@ -109,6 +119,8 @@ fn ask_the_other(lock: File) -> Option<File> {
             return Some(lock);
         }
     }
+    // Unanswered: it must not be mistaken for a later launch's.
+    let _ = fs::remove_file(request_file());
     None
 }
 

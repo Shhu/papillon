@@ -155,8 +155,13 @@ pub fn window(ui: &mut egui::Ui, shared: &Shared, id: u64) {
 
     keyboard_geometry(&ctx, state, id);
     body(ui, state, id);
-    if resize_grips(&ctx) {
+    let (resizing, clicked) = resize_grips(&ctx);
+    if resizing {
         state.user_moves(id);
+    }
+    // A plain click on a border isn't a reason to stop typing.
+    if clicked && state.confirming_delete != Some(id) {
+        state.refocus = Some(id);
     }
 
     if close || ctx.input_mut(|i| i.consume_shortcut(&SHORTCUT_CLOSE)) {
@@ -291,6 +296,10 @@ pub fn confirm_row(
             .truncate()
             .selectable(false),
     );
+    // Escape means no, and the question says what the answer is about.
+    if area.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        answer = Some(false);
+    }
     area.with_layout(egui::Layout::right_to_left(egui::Align::Center), |row| {
         let button = |text: String| {
             egui::Button::new(RichText::new(text).color(ink))
@@ -302,6 +311,9 @@ pub fn confirm_row(
         if focus_keep {
             keep.request_focus();
         }
+        row.ctx().accesskit_node_builder(keep.id, |node| {
+            node.set_label(format!("{} {}", t!("delete-question"), t!("delete-no")));
+        });
         if keep.clicked() {
             answer = Some(false);
         }
@@ -331,7 +343,10 @@ fn title_band(
         ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
     }
     // A click on the strip isn't a reason to stop typing.
-    if background.hovered() && ui.input(|i| i.pointer.primary_released()) {
+    if background.hovered()
+        && ui.input(|i| i.pointer.primary_released())
+        && state.confirming_delete != Some(id)
+    {
         state.refocus = Some(id);
     }
     let pinned = state.notes.iter().any(|n| n.id == id && n.pinned);
@@ -376,9 +391,13 @@ fn title_band(
     let palette = button(&mut row, icon::PALETTE, choosing, t!("note-color"));
     if palette.clicked() {
         state.choosing_color = (!choosing).then_some(id);
+        // Both questions at once would leave no room for the text.
+        state.confirming_delete = None;
         // From the keyboard, the next stop must be the colors, not the text.
         if palette.clicked_by(PointerButton::Primary) {
             state.refocus = Some(id);
+        } else {
+            state.focus_color = !choosing;
         }
     }
     pin_button(&mut row, state, id, pinned, colors);
@@ -439,14 +458,25 @@ fn color_strip(ui: &mut egui::Ui, state: &mut State, id: u64, strip: Rect, curre
         response.widget_info(|| {
             egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, color == current, &name)
         });
+        if color == current && std::mem::take(&mut state.focus_color) {
+            response.request_focus();
+        }
         let swatch = cell.shrink2(vec2(2.0, 6.0));
         ui.painter()
             .rect_filled(swatch, 4.0, note_colors(color).paper);
-        if color == current || response.hovered() {
+        // An outline on all: a pale color barely differs from the strip.
+        let chosen = color == current || response.hovered();
+        ui.painter().rect_stroke(
+            swatch,
+            4.0,
+            Stroke::new(if chosen { 2.0 } else { 1.0 }, colors.muted),
+            egui::StrokeKind::Inside,
+        );
+        if chosen {
             ui.painter().rect_stroke(
                 swatch,
                 4.0,
-                Stroke::new(1.5, colors.ink),
+                Stroke::new(2.0, colors.ink),
                 egui::StrokeKind::Inside,
             );
         }
@@ -502,7 +532,7 @@ fn text(ui: &mut egui::Ui, state: &mut State, id: u64, rect: Rect, colors: &Note
                 // Never smaller than the window: a click anywhere goes to the text.
                 let height = (rect.height() - 20.0).max(0.0);
                 let mut buffer = PlainText(&mut note.text);
-                let output = TextEdit::multiline(&mut buffer)
+                let response = TextEdit::multiline(&mut buffer)
                     .id(text_id(id))
                     .frame(Frame::NONE)
                     .font(theme::regular(size))
@@ -511,8 +541,9 @@ fn text(ui: &mut egui::Ui, state: &mut State, id: u64, rect: Rect, colors: &Note
                     .desired_width(f32::INFINITY)
                     .min_size(vec2(0.0, height))
                     .lock_focus(true)
-                    .show(ui);
-                let response = &output.response.response;
+                    .show(ui)
+                    .response
+                    .response;
                 ui.ctx().accesskit_node_builder(response.id, |node| {
                     node.set_label(t!("note-text-label"));
                 });
@@ -522,11 +553,6 @@ fn text(ui: &mut egui::Ui, state: &mut State, id: u64, rect: Rect, colors: &Note
                 // a click elsewhere.
                 if raise || refocus {
                     response.request_focus();
-                }
-                // A strip that opened may have pushed the cursor out of sight.
-                if refocus && let Some(range) = output.cursor_range {
-                    let cursor = output.galley.pos_from_cursor(range.primary);
-                    ui.scroll_to_rect(cursor.translate(output.galley_pos.to_vec2()), None);
                 }
             });
         });
@@ -547,8 +573,8 @@ fn text(ui: &mut egui::Ui, state: &mut State, id: u64, rect: Rect, colors: &Note
 
 /// Invisible strips along the window borders that resize it (the window has
 /// no system frame).
-fn resize_grips(ctx: &egui::Context) -> bool {
-    let mut resizing = false;
+fn resize_grips(ctx: &egui::Context) -> (bool, bool) {
+    let (mut resizing, mut clicked) = (false, false);
     let r = ctx.content_rect();
     let b = RESIZE_BORDER;
     let strips = [
@@ -568,6 +594,10 @@ fn resize_grips(ctx: &egui::Context) -> bool {
                 };
                 let direction = resize_direction(r, pos);
                 ctx.set_cursor_icon(resize_cursor(direction));
+                // The system takes over a real resize: this is a mere click.
+                if ui.input(|i| i.pointer.primary_released()) {
+                    clicked = true;
+                }
                 if response.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_pressed())
                 {
                     resizing = true;
@@ -575,7 +605,7 @@ fn resize_grips(ctx: &egui::Context) -> bool {
                 }
             });
     }
-    resizing
+    (resizing, clicked)
 }
 
 /// Which border or corner of `window` is under `pos`.

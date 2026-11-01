@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Writes assets/licenses.txt: the license texts of Papillon and of everything
 built into its binaries, read from the crates cargo downloaded, or from
-packaging/licenses/<crate>/ for the crates that don't ship them. Fails if a
-crate has no text at all. Run it after any change to Cargo.lock; publish.sh
+packaging/licenses/<crate>/ for what the crates don't ship. Fails if a crate
+has no text at all. Run it after any change to Cargo.lock; publish.sh
 refuses a file that is out of date."""
 import json
 import re
@@ -46,8 +46,8 @@ for package in sorted(meta["packages"], key=lambda p: (p["name"], p["version"]))
     crate = Path(package["manifest_path"]).parent
     texts = sorted(p for p in crate.rglob("*") if p.is_file() and names.match(p.name))
     texts = [p for p in texts if "target" not in p.relative_to(crate).parts]
-    if not texts and (supplement / key[0]).is_dir():
-        texts = sorted((supplement / key[0]).iterdir())
+    if (supplement / key[0]).is_dir():
+        texts += sorted((supplement / key[0]).iterdir())
     if not texts:
         missing.append(f"{key[0]} {key[1]}")
     out.append(f"\n{'=' * 72}\n{key[0]} {key[1]}: {package.get('license') or 'see its repository'}\n{'=' * 72}\n")

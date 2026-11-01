@@ -9,7 +9,7 @@ the SIL Open Font License 1.1: see assets/fonts/Inter-OFL.txt.
 
 As fallback, the binary also embeds egui's fonts (`epaint_default_fonts`):
 Ubuntu Light (Ubuntu Font Licence 1.0), Hack (MIT, with the Bitstream Vera
-license), Noto Emoji and emoji-icon-font (SIL Open Font License 1.1).
+license), Noto Emoji (SIL Open Font License 1.1) and emoji-icon-font (MIT).
 
 The icons are Phosphor Icons (https://phosphoricons.com), under the MIT
 license, through the `egui-phosphor` crate.

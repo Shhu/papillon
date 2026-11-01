@@ -1,7 +1,7 @@
 # A note
 note-new = New note
 note-list = All notes
-note-close = Close (kept in the list)
+note-close = Close (a written note stays in the list)
 note-delete = Delete…
 note-pin = Keep on top
 note-unpin = Stop keeping on top

@@ -15,7 +15,24 @@ mod theme;
 
 use eframe::egui;
 
+/// DLLs asked for by name while running (Direct3D's) come from System32 only.
+/// By default the folder of the .exe comes first, and a portable .exe often
+/// sits in Downloads, where anything may have been dropped beside it.
+#[cfg(windows)]
+fn restrict_dll_search() {
+    const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x800;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetDefaultDllDirectories(flags: u32) -> i32;
+    }
+    // Takes a plain value, and exists since Windows 8.
+    unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) };
+}
+
 fn main() -> eframe::Result {
+    #[cfg(windows)]
+    restrict_dll_search();
+
     // Notes must come back where they were left and may stay on top, which
     // Wayland doesn't let an app ask for: X11 (XWayland) when there is one.
     // Nothing else runs yet, so changing the environment is safe.

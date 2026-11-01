@@ -11,10 +11,17 @@ use std::sync::{LazyLock, Mutex};
 
 use eframe::egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
 use eframe::egui::{self, FontData, FontFamily, FontId};
+use skrifa::instance::{LocationRef, Size};
+use skrifa::raw::TableProvider as _;
 use skrifa::{FontRef, MetadataProvider as _};
 
 /// How deep font folders are searched.
 const SEARCH_DEPTH: u8 = 4;
+/// Fonts have from 16 units per em to 16384.
+const MIN_UNITS_PER_EM: u16 = 16;
+/// Glyphs larger than this many em come from a damaged font, and egui aborts
+/// when one doesn't fit its texture.
+const MAX_GLYPH_EM: f32 = 16.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Script {
@@ -33,6 +40,7 @@ enum Script {
 
 fn script_of(c: char) -> Option<Script> {
     Some(match c as u32 {
+        0x3130..=0x318F => Script::Hangul,
         0x0530..=0x058F | 0x10A0..=0x10FF | 0x1C90..=0x1CBF | 0x2D00..=0x2D2F => {
             Script::ArmenianGeorgian
         }
@@ -55,7 +63,7 @@ fn script_of(c: char) -> Option<Script> {
 fn candidates(script: Script) -> &'static [&'static str] {
     if cfg!(windows) {
         match script {
-            Script::Cjk => &["msyh.ttc", "YuGothR.ttc", "msgothic.ttc"],
+            Script::Cjk => &["msyh.ttc", "YuGothR.ttc", "msgothic.ttc", "simsunb.ttf"],
             Script::Hangul => &["malgun.ttf"],
             Script::Arabic | Script::Hebrew | Script::ArmenianGeorgian => {
                 &["segoeui.ttf", "tahoma.ttf"]
@@ -89,10 +97,21 @@ fn candidates(script: Script) -> &'static [&'static str] {
                 "NotoSansDevanagari-Regular.ttf",
                 "NotoSansTamil-Regular.ttf",
                 "NotoSansBengali-Regular.ttf",
+                "NotoSansTelugu-Regular.ttf",
+                "NotoSansKannada-Regular.ttf",
+                "NotoSansMalayalam-Regular.ttf",
+                "NotoSansGujarati-Regular.ttf",
+                "NotoSansGurmukhi-Regular.ttf",
+                "NotoSansOriya-Regular.ttf",
+                "NotoSansSinhala-Regular.ttf",
                 "Lohit-Devanagari.ttf",
                 "FreeSans.ttf",
             ],
-            Script::Thai => &["NotoSansThai-Regular.ttf", "FreeSerif.ttf"],
+            Script::Thai => &[
+                "NotoSansThai-Regular.ttf",
+                "NotoSansLao-Regular.ttf",
+                "FreeSerif.ttf",
+            ],
             Script::SoutheastAsian => &["NotoSansMyanmar-Regular.ttf", "NotoSansKhmer-Regular.ttf"],
             Script::Ethiopic => &["NotoSansEthiopic-Regular.ttf", "FreeSerif.ttf"],
             Script::Tibetan => &["NotoSerifTibetan-Regular.ttf"],
@@ -151,6 +170,21 @@ struct Found {
 fn examine(name: &str, data: Vec<u8>) -> Option<Found> {
     // The parser egui itself uses.
     let font = FontRef::from_index(&data, 0).ok()?;
+    let units = font.head().ok()?.units_per_em();
+    if units < MIN_UNITS_PER_EM {
+        return None;
+    }
+    // Every glyph that can be asked for must fit.
+    let metrics = font.glyph_metrics(Size::unscaled(), LocationRef::default());
+    let limit = MAX_GLYPH_EM * f32::from(units);
+    let fits = font.charmap().mappings().all(|(_, glyph)| {
+        metrics
+            .bounds(glyph)
+            .is_none_or(|b| b.x_max - b.x_min <= limit && b.y_max - b.y_min <= limit)
+    });
+    if !fits {
+        return None;
+    }
     let covers = font
         .charmap()
         .mappings()
@@ -203,22 +237,31 @@ fn start_thread(ctx: &egui::Context) -> Sender<(Script, char)> {
             loaded.insert(found.name.clone());
             covered.extend(found.covers.iter().copied());
             crate::store::lock(&LOADING).ready.push(found);
-            ctx.request_repaint();
+            // The main window's pass puts it in, even with the list hidden.
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
     });
     sender
 }
 
-/// Asks for what `text` needs and the embedded fonts lack; it shows a little
-/// later. Fonts already found go in here, between two passes' worth of text.
-pub fn ensure_for(ctx: &egui::Context, text: &str) {
-    let mut loading = crate::store::lock(&LOADING);
-    for found in std::mem::take(&mut loading.ready) {
+/// Puts in the fonts the thread found; true if there were any, and the windows
+/// have something new to draw.
+pub fn apply_ready(ctx: &egui::Context) -> bool {
+    let ready = std::mem::take(&mut crate::store::lock(&LOADING).ready);
+    let any = !ready.is_empty();
+    for found in ready {
         add(ctx, found);
     }
+    any
+}
+
+/// Asks for what `text` needs and the embedded fonts lack; it shows a little
+/// later.
+pub fn ensure_for(ctx: &egui::Context, text: &str) {
     if text.is_ascii() {
         return;
     }
+    let mut loading = crate::store::lock(&LOADING);
     let font = FontId::proportional(13.0);
     for c in text.chars().filter(|c| !c.is_ascii()) {
         if !loading.checked.insert(c) {
@@ -250,7 +293,6 @@ fn add(ctx: &egui::Context, found: Found) {
         data: FontData::from_owned(found.data),
         families: families.to_vec(),
     });
-    ctx.request_repaint();
 }
 
 #[cfg(test)]
@@ -263,6 +305,7 @@ mod tests {
         assert_eq!(script_of('한'), Some(Script::Hangul));
         assert_eq!(script_of('م'), Some(Script::Arabic));
         assert_eq!(script_of('ש'), Some(Script::Hebrew));
+        assert_eq!(script_of('ㅋ'), Some(Script::Hangul));
         assert_eq!(script_of('🦋'), Some(Script::Symbols));
         assert_eq!(script_of('é'), None);
     }
@@ -285,6 +328,30 @@ mod tests {
         let inter = include_bytes!("../assets/fonts/Inter-Regular.ttf").to_vec();
         let found = examine("inter", inter).unwrap();
         assert!(found.covers.contains(&'é'));
+    }
+
+    /// Valid as a file, but its glyphs would be huge: egui aborts on those.
+    #[test]
+    fn fonts_with_absurd_measures_are_refused() {
+        let mut data = include_bytes!("../assets/fonts/Inter-Regular.ttf").to_vec();
+        let tables = u16::from_be_bytes([data[4], data[5]]) as usize;
+        let head = (0..tables)
+            .map(|i| 12 + i * 16)
+            .find(|&entry| &data[entry..entry + 4] == b"head")
+            .map(|entry| {
+                let bytes = [
+                    data[entry + 8],
+                    data[entry + 9],
+                    data[entry + 10],
+                    data[entry + 11],
+                ];
+                u32::from_be_bytes(bytes) as usize
+            })
+            .unwrap();
+        for units in [1u16, 2, 15, 40] {
+            data[head + 18..head + 20].copy_from_slice(&units.to_be_bytes());
+            assert!(examine("trapped", data.clone()).is_none(), "{units}");
+        }
     }
 
     #[test]

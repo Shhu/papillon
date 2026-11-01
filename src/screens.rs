@@ -1,11 +1,11 @@
 //! Whether a window would be seen, for notes left on a monitor that is gone.
-//! Saying yes when unsure: moving a visible note would be worse. Positions are
-//! physical pixels and sizes points; a width is taken at the largest usual
-//! scale, again to say yes when unsure.
+//! Positions are physical pixels and sizes points. A sliver of a note doesn't
+//! count: it couldn't be grabbed.
 
 /// The part of a note that must be on a monitor to be reached: its strip.
 const STRIP_HEIGHT: i32 = 30;
-const LARGEST_SCALE: f32 = 4.0;
+/// Part of the strip that doesn't count, on each side.
+const SLIVER: i32 = 20;
 /// What must be within a monitor for a new note to be of use, in pixels.
 const USABLE: [i32; 2] = [200, 120];
 
@@ -23,12 +23,23 @@ fn contains(outer: Area, inner: Area) -> bool {
 
 fn strip(position: [f32; 2], size: [f32; 2]) -> Area {
     let [x, y] = position.map(|v| v as i32);
-    [x, y, x + (size[0] * LARGEST_SCALE) as i32, y + STRIP_HEIGHT]
+    let width = (size[0] * platform::system_scale()) as i32;
+    [
+        x.saturating_add(SLIVER),
+        y.saturating_add(STRIP_HEIGHT / 4),
+        x.saturating_add(width - SLIVER),
+        y.saturating_add(STRIP_HEIGHT),
+    ]
 }
 
 fn usable(position: [f32; 2]) -> Area {
     let [x, y] = position.map(|v| v as i32);
-    [x, y, x + USABLE[0], y + USABLE[1]]
+    [
+        x,
+        y,
+        x.saturating_add(USABLE[0]),
+        y.saturating_add(USABLE[1]),
+    ]
 }
 
 #[cfg(windows)]
@@ -59,6 +70,14 @@ mod platform {
     unsafe extern "system" {
         fn MonitorFromRect(rect: *const Rect, flags: u32) -> *mut c_void;
         fn GetMonitorInfoW(monitor: *mut c_void, info: *mut MonitorInfo) -> i32;
+        fn GetDpiForSystem() -> u32;
+    }
+
+    /// The main screen's scale: right for most, and a note on another monitor
+    /// that comes back early has lost nothing.
+    pub fn system_scale() -> f32 {
+        // Takes nothing, and exists since Windows 10.
+        unsafe { GetDpiForSystem() as f32 / 96.0 }
     }
 
     fn monitor_of(area: Area) -> *mut c_void {
@@ -128,7 +147,9 @@ mod platform {
         {
             return areas.clone();
         }
-        let areas = ask_x().unwrap_or_default();
+        let Some(areas) = ask_x() else {
+            return Vec::new();
+        };
         *known = Some((Instant::now(), areas.clone()));
         areas
     }
@@ -163,6 +184,11 @@ mod platform {
             (xlib.XCloseDisplay)(display);
             Some(areas)
         }
+    }
+
+    /// X11 has no scale of its own to ask for.
+    pub fn system_scale() -> f32 {
+        1.0
     }
 
     pub fn shows(area: Area) -> bool {
@@ -204,9 +230,16 @@ pub fn has_no_battery() -> bool {
     known && status.battery_flag != UNKNOWN && status.battery_flag & NO_SYSTEM_BATTERY != 0
 }
 
+/// Known not to run on a battery; unknown counts as a battery.
 #[cfg(not(windows))]
 pub fn has_no_battery() -> bool {
-    false
+    let Ok(supplies) = std::fs::read_dir("/sys/class/power_supply") else {
+        return false;
+    };
+    !supplies.filter_map(Result::ok).any(|supply| {
+        std::fs::read_to_string(supply.path().join("type"))
+            .is_ok_and(|kind| kind.trim() == "Battery")
+    })
 }
 
 /// Whether the strip of a window placed there is on a monitor.
@@ -233,10 +266,26 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_note_left_of_the_screen_still_counts_at_any_scale() {
-        // At 200%, a note of 280 points at x = -500 reaches x = 60.
-        let area = strip([-500.0, 10.0], [280.0, 200.0]);
-        assert!(overlap([0, 0, 1000, 1000], area));
+    fn a_note_on_a_monitor_that_is_gone_is_lost_and_a_sliver_does_not_count() {
+        let screen = [0, 0, 1000, 1000];
+        let scale = platform::system_scale();
+        let width = 280.0;
+        // Entirely left of the screen, as on a left monitor now unplugged.
+        let gone = strip([-2.0 * width * scale, 10.0], [width, 200.0]);
+        assert!(!overlap(screen, gone));
+        // Its right edge just inside.
+        let sliver = strip([-(width * scale) + 10.0, 10.0], [width, 200.0]);
+        assert!(!overlap(screen, sliver));
+        // Half on screen.
+        let half = strip([-(width * scale) / 2.0, 10.0], [width, 200.0]);
+        assert!(overlap(screen, half));
+    }
+
+    #[test]
+    fn huge_positions_do_not_overflow() {
+        let area = strip([1e30, 1e30], [280.0, 200.0]);
+        assert!(!overlap([0, 0, 1000, 1000], area));
+        assert!(!contains([0, 0, 1000, 1000], usable([1e30, 1e30])));
     }
 
     #[cfg(windows)]

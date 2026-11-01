@@ -22,12 +22,12 @@ const SHORTCUT_NEW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND,
 
 pub fn ui(ui: &mut egui::Ui, state: &mut State) {
     let p = palette(ui);
+    if ui.ctx().input_mut(|i| i.consume_shortcut(&SHORTCUT_NEW)) {
+        state.create(None);
+    }
     if state.show_licenses {
         licenses(ui, state);
         return;
-    }
-    if ui.ctx().input_mut(|i| i.consume_shortcut(&SHORTCUT_NEW)) {
-        new_note(state);
     }
     Frame::new().fill(p.bg).inner_margin(14).show(ui, |ui| {
         ui.set_min_size(ui.available_size());
@@ -50,7 +50,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State) {
                 theme::focus_ring(ui, response.rect, &response, p.on_accent);
                 name(ui, &response, t!("list-new"));
                 if response.clicked() {
-                    new_note(state);
+                    state.create(None);
                 }
             });
         });
@@ -80,25 +80,19 @@ pub fn ui(ui: &mut egui::Ui, state: &mut State) {
             ui.vertical_centered(|ui| ui.label(RichText::new(message).color(p.muted)));
             return;
         }
-        // Only the cards in sight are built.
+        // All of them, even out of sight: the Tab key can only reach what's built.
         ui.spacing_mut().item_spacing.y = CARD_GAP;
-        egui::ScrollArea::vertical().auto_shrink(false).show_rows(
-            ui,
-            CARD_HEIGHT,
-            listed.len(),
-            |ui, range| {
-                for &id in &listed[range] {
-                    card(ui, state, id);
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                for (i, &id) in listed.iter().enumerate() {
+                    let next = listed
+                        .get(i + 1)
+                        .or(i.checked_sub(1).and_then(|p| listed.get(p)));
+                    card(ui, state, id, next.copied());
                 }
-            },
-        );
+            });
     });
-}
-
-/// A new note, in sight: a search it doesn't match would hide it.
-fn new_note(state: &mut State) {
-    state.search.clear();
-    state.create(None);
 }
 
 /// The name for screen readers, without the icons in the visible text.
@@ -132,6 +126,10 @@ fn banners(ui: &mut egui::Ui, state: &mut State) {
         .inner_margin(10)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            // Selected, to copy the path: still legible on this background.
+            let selection = &mut ui.visuals_mut().selection;
+            selection.bg_fill = egui::Color32::from_black_alpha(120);
+            selection.stroke.color = egui::Color32::WHITE;
             let label = ui.label(RichText::new(message).color(egui::Color32::WHITE));
             // Announced by screen readers as soon as it shows.
             ui.ctx().accesskit_node_builder(label.id, |node| {
@@ -152,14 +150,19 @@ fn banners(ui: &mut egui::Ui, state: &mut State) {
         });
 }
 
-fn card(ui: &mut egui::Ui, state: &mut State, id: u64) {
+/// A preview needs no more: layout time grows with a line's length.
+const PREVIEW_CHARS: usize = 200;
+
+/// `next` is the card to go to if this one goes.
+fn card(ui: &mut egui::Ui, state: &mut State, id: u64, next: Option<u64>) {
     let Some(note) = state.notes.iter().find(|n| n.id == id) else {
         return;
     };
     let colors = note_colors(note.color);
     let open = note.open;
     let (first, second) = note.preview();
-    let (first, second) = (first.to_owned(), second.to_owned());
+    let [first, second] =
+        [first, second].map(|l| l.chars().take(PREVIEW_CHARS).collect::<String>());
     let width = ui.available_width() - 8.0;
     let (rect, _) = ui.allocate_exact_size(vec2(width, CARD_HEIGHT), Sense::hover());
     // Named after the note and not its row: the keyboard's focus stays on the
@@ -197,7 +200,10 @@ fn card(ui: &mut egui::Ui, state: &mut State, id: u64) {
         let inside = rect.shrink2(vec2(12.0, 5.0));
         let focus_keep = std::mem::take(&mut state.confirm_fresh);
         match note::confirm_row(ui, inside, colors.ink, colors.hover, focus_keep) {
-            Some(true) => state.delete(id),
+            Some(true) => {
+                state.delete(id);
+                state.refocus_card = next;
+            }
             Some(false) => {
                 state.confirming_delete = None;
                 state.refocus_card = Some(id);
@@ -219,8 +225,8 @@ fn card(ui: &mut egui::Ui, state: &mut State, id: u64) {
         && ui
             .ctx()
             .input_mut(|i| i.consume_key(Modifiers::NONE, Key::Delete));
-    if delete_key {
-        state.request_delete(id);
+    if delete_key && state.request_delete(id) {
+        state.refocus_card = next;
     }
 
     let button = Rect::from_center_size(
@@ -252,8 +258,8 @@ fn card(ui: &mut egui::Ui, state: &mut State, id: u64) {
     if trash.gained_focus() {
         response.scroll_to_me(None);
     }
-    if trash.clicked() {
-        state.request_delete(id);
+    if trash.clicked() && state.request_delete(id) {
+        state.refocus_card = next;
     }
 }
 
@@ -295,12 +301,33 @@ fn licenses(ui: &mut egui::Ui, state: &mut State) {
         }
         ui.add_space(6.0);
         let height = ui.text_style_height(&egui::TextStyle::Small) + 2.0;
+        let page = (ui.available_height() - height).max(height);
+        let everything = height * LINES.len() as f32;
+        let delta = ui.ctx().input_mut(|i| {
+            let mut delta = 0.0;
+            for (key, step) in [
+                (Key::ArrowUp, height * 3.0),
+                (Key::ArrowDown, -height * 3.0),
+                (Key::PageUp, page),
+                (Key::PageDown, -page),
+                (Key::Home, everything),
+                (Key::End, -everything),
+            ] {
+                if i.consume_key(Modifiers::NONE, key) {
+                    delta += step;
+                }
+            }
+            delta
+        });
         ui.spacing_mut().item_spacing.y = 2.0;
         egui::ScrollArea::both().auto_shrink(false).show_rows(
             ui,
             height,
             LINES.len(),
             |ui, range| {
+                if delta != 0.0 {
+                    ui.scroll_with_delta(vec2(0.0, delta));
+                }
                 for line in &LINES[range] {
                     ui.add(
                         egui::Label::new(RichText::new(*line).small().color(p.text))
@@ -353,10 +380,9 @@ fn settings_menu(ui: &mut egui::Ui, state: &mut State) {
         });
         name(ui, &theme_menu.response, t!("menu-theme"));
         let mut autostart = state.autostart;
-        if ui.checkbox(&mut autostart, t!("menu-autostart")).clicked()
-            && crate::autostart::set(autostart)
-        {
+        if ui.checkbox(&mut autostart, t!("menu-autostart")).clicked() {
             state.autostart = autostart;
+            crate::autostart::set_in_background(ui.ctx(), autostart);
         }
         if ui.button(t!("menu-bring-back")).clicked() {
             state.bring_back();

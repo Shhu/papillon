@@ -10,7 +10,7 @@ use eframe::egui::{self, IconData, ViewportBuilder, ViewportCommand, ViewportId}
 
 use crate::instance::{self, Instance};
 use crate::note;
-use crate::store::{self, MIN_SIZE, SAVE_DELAY, State};
+use crate::store::{self, ListClosed, MIN_SIZE, SAVE_DELAY, State};
 
 pub const APP_NAME: &str = "Papillon";
 pub const APP_ID: &str = "io.github.Shhu.Papillon";
@@ -53,7 +53,10 @@ impl App {
         state.rescue_lost();
         // The list also has to say when something is wrong with the notes.
         let problem = state.protected || state.set_aside.is_some();
-        state.list_visible = problem || state.cannot_hide || !state.notes.iter().any(|n| n.open);
+        // This launch was also a request to see it.
+        let asked = instance.asked_for_list;
+        state.list_visible =
+            asked || problem || state.cannot_hide || !state.notes.iter().any(|n| n.open);
         let hiding_passes = if state.list_visible { 0 } else { HIDING_PASSES };
         let woken = ctx.clone();
         state.on_write_outcome = Some(Arc::new(move || {
@@ -147,21 +150,18 @@ impl App {
             .map(|n| n.id)
             .collect();
         for id in closing {
+            // Right now: with everything minimized, windows that are no longer
+            // declared aren't removed until some window gets a real pass.
+            ctx.send_viewport_cmd_to(note::viewport_id(id), ViewportCommand::Visible(false));
             state.close(id);
         }
         if !ctx.input(|i| i.viewport().close_requested()) || state.quit {
             return;
         }
         ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-        if !state.notes.iter().any(|n| n.open) {
-            // Through the same door as the menu, which warns if saving fails.
-            state.quit = true;
-        } else if state.cannot_hide {
-            ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
-        } else {
-            // With notes on the desktop, closing the list only hides it.
-            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-            state.list_visible = false;
+        match state.close_list() {
+            ListClosed::Hides => ctx.send_viewport_cmd(ViewportCommand::Visible(false)),
+            ListClosed::Quits | ListClosed::Stays => {}
         }
     }
 
@@ -194,6 +194,13 @@ impl eframe::App for App {
         let mut guard = store::lock(&shared);
         let state = &mut *guard;
         self.handle_close(ctx, state);
+        if crate::fonts::apply_ready(ctx) {
+            note::repaint_all(ctx, state);
+            ctx.request_repaint();
+        }
+        if crate::autostart::failed() {
+            state.autostart = crate::autostart::is_enabled();
+        }
         if state.quit && state.try_quit() {
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
@@ -236,6 +243,11 @@ mod tests {
     use crate::store::{Color, TextSize};
     use crate::{hub, theme};
 
+    /// The safe answer's name carries the question for screen readers.
+    fn keep_label() -> String {
+        format!("{} {}", t!("delete-question"), t!("delete-no"))
+    }
+
     /// A note's window content, driven like a user would.
     fn note_harness(text: &str) -> egui_kittest::Harness<'static, State> {
         let mut state = State::default();
@@ -266,7 +278,7 @@ mod tests {
         harness.get_by_label(&t!("note-delete")).click();
         harness.run_steps(2);
         assert_eq!(harness.state().notes.len(), 1);
-        harness.get_by_label(&t!("delete-no")).click();
+        harness.get_by_label(&keep_label()).click();
         harness.run_steps(2);
         assert_eq!(harness.state().notes.len(), 1);
         assert_eq!(harness.state().confirming_delete, None);
@@ -382,7 +394,7 @@ mod tests {
         harness.get_by_label(&name).click();
         harness.run_steps(2);
         assert_eq!(harness.state().confirming_delete, Some(1));
-        let keep = harness.get_by_label(&t!("delete-no")).rect();
+        let keep = harness.get_by_label(&keep_label()).rect();
         let delete = harness.get_by_label(&t!("delete-yes")).rect();
         assert!(!delete.contains(trash), "{delete:?} under {trash:?}");
         assert!(keep.left() > delete.right() - 1.0);
@@ -507,7 +519,7 @@ mod tests {
         harness.run_steps(2);
         assert_eq!(harness.state().confirming_delete, Some(1));
         assert_eq!(harness.state().notes.len(), 1);
-        assert!(harness.get_by_label(&t!("delete-no")).is_focused());
+        assert!(harness.get_by_label(&keep_label()).is_focused());
     }
 
     #[test]
@@ -517,7 +529,7 @@ mod tests {
         harness.run_steps(2);
         harness.key_press(egui::Key::Delete);
         harness.run_steps(2);
-        harness.get_by_label(&t!("delete-no")).click();
+        harness.get_by_label(&keep_label()).click();
         harness.run_steps(3);
         assert!(harness.get_by_label("Courses").is_focused());
     }
@@ -571,12 +583,141 @@ mod tests {
     fn the_licenses_show_in_the_list_and_name_what_is_built_in() {
         assert!(LICENSES.contains("Emil Ernerfeldt"));
         assert!(LICENSES.contains("Ubuntu Font Licence"));
+        assert!(LICENSES.contains("Copyright (c) 2023 Phosphor Icons"));
         let mut harness = list_harness(&["x"]);
         harness.state_mut().show_licenses = true;
         harness.run_steps(2);
         harness.get_by_label(&t!("licenses-back")).click();
         harness.run_steps(2);
         assert!(!harness.state().show_licenses);
+    }
+
+    #[test]
+    fn the_keyboard_reaches_every_card_backwards_too() {
+        let texts: Vec<String> = (0..40).map(|i| format!("note {i}")).collect();
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let mut harness = list_harness(&texts);
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..200 {
+            harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Tab);
+            harness.run_steps(3);
+            for i in 0..40 {
+                let name = format!("note {i}");
+                if harness
+                    .query_by_label(&name)
+                    .is_some_and(|node| node.is_focused())
+                {
+                    seen.insert(i);
+                }
+            }
+        }
+        assert_eq!(seen.len(), 40, "reached: {seen:?}");
+    }
+
+    #[test]
+    fn the_keyboard_scrolls_the_licenses() {
+        let mut harness = list_harness(&["x"]);
+        harness.state_mut().show_licenses = true;
+        harness.run_steps(3);
+        let first = "Papillon and the works built into it";
+        assert!(harness.query_by_label(first).is_some());
+        harness.key_press(egui::Key::End);
+        harness.run_steps(5);
+        assert!(harness.query_by_label(first).is_none());
+        harness.key_press(egui::Key::Home);
+        harness.run_steps(5);
+        assert!(harness.query_by_label(first).is_some());
+    }
+
+    #[test]
+    fn ctrl_n_works_from_the_licenses() {
+        let mut harness = list_harness(&["x"]);
+        harness.state_mut().show_licenses = true;
+        harness.run_steps(2);
+        harness.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::N);
+        harness.run_steps(2);
+        assert_eq!(harness.state().notes.len(), 2);
+    }
+
+    #[test]
+    fn deleting_from_the_list_with_the_keyboard_goes_on_to_the_next_card() {
+        let mut harness = list_harness(&["un", "deux", ""]);
+        harness.state_mut().notes[2].text = "trois".into();
+        harness.run_steps(2);
+        harness.get_by_label("deux").focus();
+        harness.run_steps(2);
+        harness.key_press(egui::Key::Delete);
+        harness.run_steps(2);
+        harness.get_by_label(&t!("delete-yes")).click();
+        harness.run_steps(4);
+        assert_eq!(harness.state().notes.len(), 2);
+        let focused = ["un", "trois"]
+            .iter()
+            .filter(|n| harness.get_by_label(n).is_focused())
+            .count();
+        assert_eq!(focused, 1);
+    }
+
+    #[test]
+    fn escape_keeps_the_note() {
+        let mut harness = note_harness("x");
+        harness.get_by_label(&t!("note-delete")).click();
+        harness.run_steps(2);
+        harness.key_press(egui::Key::Escape);
+        harness.run_steps(2);
+        assert_eq!(harness.state().confirming_delete, None);
+        assert_eq!(harness.state().notes.len(), 1);
+    }
+
+    #[test]
+    fn the_palette_and_the_question_do_not_show_together() {
+        let mut harness = note_harness("x");
+        harness.get_by_label(&t!("note-color")).click();
+        harness.run_steps(2);
+        harness.get_by_label(&t!("note-delete")).click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().choosing_color, None);
+        harness.get_by_label(&t!("note-color")).click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().confirming_delete, None);
+    }
+
+    #[test]
+    fn colors_opened_from_the_keyboard_take_the_focus() {
+        let mut harness = note_harness("x");
+        harness.get_by_label(&t!("note-color")).focus();
+        harness.run_steps(2);
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(3);
+        assert!(harness.get_by_label(&t!("color-yellow")).is_focused());
+    }
+
+    #[test]
+    fn a_click_on_the_strip_keeps_the_place_in_a_long_note() {
+        let text = "line\n".repeat(200);
+        let mut harness = note_harness(&text);
+        harness
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .focus();
+        harness.run_steps(3);
+        let field = |h: &egui_kittest::Harness<'static, State>| {
+            h.get_by_role(egui::accesskit::Role::MultilineTextInput)
+                .rect()
+                .top()
+        };
+        harness.hover_at(egui::pos2(150.0, 200.0));
+        harness.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -2000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(10);
+        let scrolled = field(&harness);
+        assert!(scrolled < -100.0, "{scrolled}");
+        harness.get_by_label(&t!("note-pin")).click();
+        harness.run_steps(5);
+        assert_eq!(field(&harness), scrolled);
     }
 
     /// A desktop with notes and the list, made of the real pieces, for the

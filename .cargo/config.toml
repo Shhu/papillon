@@ -1,4 +1,6 @@
 # Windows: Microsoft's C runtime is linked into the .exe, so it runs without
 # the Visual C++ Redistributable.
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+# DLLs linked at build time come from System32 only, not from the folder of the
+# .exe, which is often Downloads (see `restrict_dll_search` for the others).
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/DEPENDENTLOADFLAG:0x800"]

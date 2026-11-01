@@ -107,6 +107,8 @@ mod platform {
         Command::new("gdbus")
             .args([
                 "call",
+                "--timeout",
+                "5",
                 "--session",
                 "--dest",
                 "org.freedesktop.portal.Desktop",
@@ -162,7 +164,37 @@ mod platform {
     pub fn refresh() {}
 }
 
-pub use platform::{is_enabled, refresh, set};
+pub use platform::{is_enabled, refresh};
+
+use std::sync::atomic::{AtomicU8, Ordering};
+
+use eframe::egui;
+
+const PENDING: u8 = 0;
+const WORKED: u8 = 1;
+const FAILED: u8 = 2;
+
+static OUTCOME: AtomicU8 = AtomicU8::new(PENDING);
+
+/// Changes the setting on a thread: the portal or the registry tool may take
+/// their time, and every window would wait. The list knows through `failed`.
+pub fn set_in_background(ctx: &egui::Context, enabled: bool) {
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let outcome = if platform::set(enabled) {
+            WORKED
+        } else {
+            FAILED
+        };
+        OUTCOME.store(outcome, Ordering::SeqCst);
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+    });
+}
+
+/// Whether the last change didn't work, once.
+pub fn failed() -> bool {
+    OUTCOME.swap(PENDING, Ordering::SeqCst) == FAILED
+}
 
 #[cfg(all(test, not(windows)))]
 mod tests {
