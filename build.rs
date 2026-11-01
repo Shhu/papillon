@@ -10,6 +10,12 @@ fn main() {
         .set_icon("assets/icon.ico")
         .set("ProductName", "Papillon")
         .set("FileDescription", "Papillon")
+        .set("OriginalFilename", "papillon.exe")
+        .set("CompanyName", "Shhu")
+        .set(
+            "LegalCopyright",
+            "The Papillon contributors, MIT or Apache-2.0",
+        )
         .compile()
         .expect("Windows resources (icon) compiled");
 }

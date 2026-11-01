@@ -14,8 +14,6 @@ finish-args:
   # stay on top, which Wayland doesn't let an app ask for.
   - --socket=x11
   - --device=dri
-  # "Start with the computer" writes its entry there.
-  - --filesystem=xdg-config/autostart:create
 modules:
   - name: papillon
     buildsystem: simple
@@ -25,13 +23,13 @@ modules:
         CARGO_HOME: /run/build/papillon/cargo
         CARGO_NET_OFFLINE: 'true'
     build-commands:
-      - cargo --offline fetch --manifest-path Cargo.toml --verbose
-      - cargo --offline build --release --verbose
+      - cargo --offline fetch --locked --manifest-path Cargo.toml --verbose
+      - cargo --offline build --release --locked --verbose
       - install -Dm755 target/release/papillon /app/bin/papillon
       - install -Dm644 packaging/flatpak/io.github.Shhu.Papillon.desktop /app/share/applications/io.github.Shhu.Papillon.desktop
       - install -Dm644 assets/icon.svg /app/share/icons/hicolor/scalable/apps/io.github.Shhu.Papillon.svg
       - install -Dm644 packaging/flatpak/io.github.Shhu.Papillon.metainfo.xml /app/share/metainfo/io.github.Shhu.Papillon.metainfo.xml
-      - install -Dm644 -t /app/share/licenses/io.github.Shhu.Papillon LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md assets/fonts/Inter-OFL.txt
+      - install -Dm644 -t /app/share/licenses/io.github.Shhu.Papillon LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md assets/licenses.txt assets/fonts/Inter-OFL.txt
     sources:
       - type: dir
         path: ../..

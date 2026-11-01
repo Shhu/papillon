@@ -18,5 +18,5 @@ license, through the `egui-phosphor` crate.
 
 Papillon is built with many Rust crates, each under its own license (MIT,
 Apache-2.0, BSD, zlib, Unicode-3.0 and similar permissive licenses, choosing
-the permissive option where a crate offers several); see Cargo.lock for the
-list.
+the permissive option where a crate offers several); their license texts are in
+assets/licenses.txt, in the *Licenses* menu of the app and beside each release.

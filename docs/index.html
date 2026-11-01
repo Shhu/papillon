@@ -104,30 +104,30 @@ html:not([lang=en]) [data-lang=en],html:not([lang=fr]) [data-lang=fr]{display:no
       <p class="sub" data-lang="en">No account and no menus to learn: a note, some text, and that's it.</p>
       <p class="sub" data-lang="fr">Sans compte ni menus à apprendre&nbsp;: une note, du texte, et c'est tout.</p>
       <div class="grid">
-        <div class="card"><div class="ic">⧉</div>
+        <div class="card"><div class="ic" aria-hidden="true">⧉</div>
           <h3 data-lang="en">Each note, its own window</h3><h3 data-lang="fr">Chaque note, sa fenêtre</h3>
           <p data-lang="en">Move and resize notes anywhere on the desktop: they come back exactly where you left them.</p>
           <p data-lang="fr">Déplacez et redimensionnez vos notes sur le bureau&nbsp;: elles reviennent exactement là où vous les avez laissées.</p></div>
-        <div class="card"><div class="ic">↥</div>
+        <div class="card"><div class="ic" aria-hidden="true">↥</div>
           <h3 data-lang="en">On top when it counts</h3><h3 data-lang="fr">Au premier plan quand il le faut</h3>
-          <p data-lang="en">Pin a note above the other windows, leave the others behind your work.</p>
-          <p data-lang="fr">Épinglez une note au-dessus des autres fenêtres, laissez les autres derrière votre travail.</p></div>
-        <div class="card"><div class="ic">◐</div>
+          <p data-lang="en">Keep a note above the other windows, leave the others behind your work.</p>
+          <p data-lang="fr">Gardez une note au-dessus des autres fenêtres, laissez les autres derrière votre travail.</p></div>
+        <div class="card"><div class="ic" aria-hidden="true">◐</div>
           <h3 data-lang="en">Seven colors</h3><h3 data-lang="fr">Sept couleurs</h3>
           <p data-lang="en">Yellow, of course, and six others. Three text sizes, dark and light themes for the list.</p>
           <p data-lang="fr">Le jaune, bien sûr, et six autres. Trois tailles de texte, thèmes sombre et clair pour la liste.</p></div>
-        <div class="card"><div class="ic">⌕</div>
+        <div class="card"><div class="ic" aria-hidden="true">⌕</div>
           <h3 data-lang="en">A list to find everything</h3><h3 data-lang="fr">Une liste pour tout retrouver</h3>
           <p data-lang="en">Search your notes, reopen the ones you closed, delete the ones you no longer need.</p>
           <p data-lang="fr">Cherchez dans vos notes, rouvrez celles que vous avez fermées, supprimez celles qui ne servent plus.</p></div>
-        <div class="card"><div class="ic">✓</div>
+        <div class="card"><div class="ic" aria-hidden="true">✓</div>
           <h3 data-lang="en">Nothing to save</h3><h3 data-lang="fr">Rien à enregistrer</h3>
           <p data-lang="en">Written to disk as you type, on your computer only. No account, no cloud.</p>
           <p data-lang="fr">Écrit sur le disque pendant la frappe, sur votre ordinateur seulement. Sans compte, sans cloud.</p></div>
-        <div class="card"><div class="ic">⏻</div>
+        <div class="card"><div class="ic" aria-hidden="true">⏻</div>
           <h3 data-lang="en">There when you sit down</h3><h3 data-lang="fr">Là quand vous arrivez</h3>
-          <p data-lang="en">Can start with the computer, and stays quiet: no processor use while you are not typing.</p>
-          <p data-lang="fr">Peut démarrer avec l'ordinateur et reste discret&nbsp;: aucune charge du processeur quand vous n'écrivez pas.</p></div>
+          <p data-lang="en">Can start with the computer, and stays quiet: next to no processor use while you are not typing.</p>
+          <p data-lang="fr">Peut démarrer avec l'ordinateur et reste discret&nbsp;: presque aucune charge du processeur quand vous n'écrivez pas.</p></div>
       </div>
     </div>
   </section>
@@ -170,6 +170,8 @@ const saved = (() => { try { return localStorage.getItem('lang'); } catch { retu
 const browser = (navigator.language || 'en').toLowerCase().startsWith('fr') ? 'fr' : 'en';
 function setLang(l) {
   document.documentElement.lang = l;
+  document.title = l === 'fr' ? 'Papillon — notes flottantes' : 'Papillon — sticky notes';
+  document.querySelector('.lang').setAttribute('aria-label', l === 'fr' ? 'Langue' : 'Language');
   document.querySelectorAll('.lang button').forEach(b => b.setAttribute('aria-pressed', b.dataset.set === l));
   document.querySelectorAll('img[data-shot]').forEach(img => {
     img.src = `shots/${l}-${img.dataset.shot}.webp`;

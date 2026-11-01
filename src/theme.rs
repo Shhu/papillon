@@ -40,7 +40,7 @@ pub const DARK: Palette = Palette {
     line: rgb(0x2C313A),
     text: rgb(0xE7E9EE),
     muted: rgb(0x9AA3B2),
-    faint: rgb(0x7D8696),
+    faint: rgb(0x8F98A8),
     accent: rgb(0xFFD84D),
     accent_soft: rgba(0xFF, 0xD8, 0x4D, 0.16),
     accent_ink: rgb(0xFFD84D),
@@ -88,7 +88,7 @@ pub fn note_colors(color: Color) -> NoteColors {
         paper: rgb(paper),
         band: rgb(band),
         ink: rgb(0x26231A),
-        muted: rgba(0x26, 0x23, 0x1A, 0.62),
+        muted: rgba(0x26, 0x23, 0x1A, 0.72),
         hover: rgba(0, 0, 0, 0.10),
         dark: false,
     };
@@ -110,8 +110,8 @@ pub fn note_colors(color: Color) -> NoteColors {
     }
 }
 
-const SEMIBOLD: &str = "inter-semibold";
-const MEDIUM: &str = "inter-medium";
+pub const SEMIBOLD: &str = "inter-semibold";
+pub const MEDIUM: &str = "inter-medium";
 const ICONS: &str = "icons";
 
 /// Inter, the interface's font.
@@ -139,6 +139,8 @@ pub fn install(ctx: &egui::Context) {
     ctx.style_mut_of(Theme::Dark, |s| style(s, &DARK));
     ctx.style_mut_of(Theme::Light, |s| style(s, &LIGHT));
     ctx.set_theme(saved_theme());
+    // Zooming would change the size notes are saved with.
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
 }
 
 /// Inter (assets/fonts, OFL), with Phosphor icons and egui's fonts as
@@ -285,6 +287,7 @@ pub fn glyph_button(
     if on || response.hovered() {
         ui.painter().rect_filled(rect, 6.0, hover_fill);
     }
+    focus_ring(ui, rect, &response, color);
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
@@ -294,6 +297,14 @@ pub fn glyph_button(
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
     response.on_hover_text(tip)
+}
+
+/// Shows where the keyboard is.
+pub fn focus_ring(ui: &egui::Ui, rect: Rect, response: &egui::Response, color: Color32) {
+    if response.has_focus() {
+        ui.painter()
+            .rect_stroke(rect, 6.0, Stroke::new(1.5, color), egui::StrokeKind::Inside);
+    }
 }
 
 /// Paints `text` on one line in `rect`, cut with "…" when it doesn't fit.

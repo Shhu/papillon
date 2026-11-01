@@ -9,7 +9,7 @@
 #   python3 flatpak-cargo-generator.py ../../Cargo.lock -o cargo-sources.json
 set -e
 cd "$(dirname "$0")"
-[ cargo-sources.json -nt ../../Cargo.lock ] ||
+python3 check-sources.py ../../Cargo.lock cargo-sources.json ||
     { echo "Cargo.lock changed: regenerate cargo-sources.json (see above)"; exit 1; }
 flatpak-builder --user --install-deps-from=flathub --force-clean --disable-rofiles-fuse \
     --repo=repo build io.github.Shhu.Papillon.yml

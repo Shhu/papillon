@@ -8,7 +8,7 @@ pub fn dir() -> PathBuf {
     if cfg!(test) {
         return std::env::temp_dir().join("papillon-test-config");
     }
-    if let Some(roaming) = std::env::var_os("APPDATA") {
+    if let Some(roaming) = std::env::var_os("APPDATA").filter(|_| cfg!(windows)) {
         PathBuf::from(roaming).join("Papillon")
     } else if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
         PathBuf::from(config).join("papillon")

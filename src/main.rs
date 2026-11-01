@@ -4,10 +4,12 @@
 mod app;
 mod autostart;
 mod config;
+mod fonts;
 mod hub;
 mod i18n;
 mod instance;
 mod note;
+mod screens;
 mod store;
 mod theme;
 
@@ -41,7 +43,6 @@ fn main() -> eframe::Result {
         .with_min_inner_size([280.0, 320.0])
         // The list of notes stays out of the way of the notes themselves.
         .with_visible(!any_open);
-    #[allow(unused_mut)]
     let mut options = eframe::NativeOptions {
         viewport,
         ..Default::default()
@@ -53,6 +54,11 @@ fn main() -> eframe::Result {
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
         setup.instance_descriptor.backends =
             eframe::wgpu::Backends::DX12 | eframe::wgpu::Backends::GL;
+    }
+    // Notes don't need the big graphics card of a laptop that has two.
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        setup.power_preference = eframe::wgpu::PowerPreference::from_env()
+            .unwrap_or(eframe::wgpu::PowerPreference::LowPower);
     }
     eframe::run_native(
         app::APP_NAME,

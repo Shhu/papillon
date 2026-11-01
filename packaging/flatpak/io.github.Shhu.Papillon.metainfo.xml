@@ -38,7 +38,18 @@
     <control>pointing</control>
     <control>keyboard</control>
   </supports>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Notes on the desktop, beside the list of notes</caption>
+      <image>https://shu-app.com/papillon/shots/en-main.png</image>
+    </screenshot>
+  </screenshots>
   <releases>
+    <release version="0.1.1" date="2026-11-01">
+      <description>
+        <p>Notes are safer: an unreadable file is never overwritten, and a failed save says so. A minimized note reopens from the list, typing goes on after a button, the scroll bar can be dragged, and notes can't get lost on a monitor that is gone. Keyboard moves, more writing systems, better contrast.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-11-01">
       <description>
         <p>First version: notes on the desktop, colors, keeping on top, a list with search, starting with the computer.</p>

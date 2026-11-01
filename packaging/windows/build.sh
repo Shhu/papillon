@@ -6,5 +6,5 @@
 set -e
 cd "$(dirname "$0")/../.."
 . packaging/windows/paths.sh
-"$WIN_HOME_WSL/.cargo/bin/cargo.exe" build --release --target-dir "$WIN_TARGET"
+"$WIN_HOME_WSL/.cargo/bin/cargo.exe" build --release --locked --target-dir "$WIN_TARGET"
 printf 'Ready: %s\n' "$WIN_TARGET\\release\\papillon.exe"

@@ -3,17 +3,26 @@
 //! that note only, instead of every window one screen refresh after another.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use eframe::egui::{self, IconData, ViewportBuilder, ViewportCommand};
+use eframe::egui::text_edit::TextEditState;
+use eframe::egui::{self, IconData, ViewportBuilder, ViewportCommand, ViewportId};
 
 use crate::instance::{self, Instance};
 use crate::note;
-use crate::store::{MIN_SIZE, SAVE_DELAY, State};
+use crate::store::{self, MIN_SIZE, SAVE_DELAY, State};
 
 pub const APP_NAME: &str = "Papillon";
 pub const APP_ID: &str = "io.github.Shhu.Papillon";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Of Papillon and everything built into it (packaging/third-party-licenses.py).
+pub const LICENSES: &str = include_str!("../assets/licenses.txt");
+
+/// Passes during which the main window is hidden again after launch: eframe
+/// shows it after its first paint, whatever it was built with.
+const HIDING_PASSES: u8 = 5;
+/// How long the list insists on getting the focus when it shows.
+const LIST_FOCUS: Duration = Duration::from_secs(1);
 
 pub type Shared = Arc<Mutex<State>>;
 
@@ -28,6 +37,8 @@ pub fn icon() -> Arc<IconData> {
 pub struct App {
     shared: Shared,
     icon: Arc<IconData>,
+    hiding_passes: u8,
+    list_focus_until: Option<Instant>,
     _instance: Instance,
 }
 
@@ -35,16 +46,27 @@ impl App {
     pub fn new(ctx: &egui::Context, mut state: State, instance: Instance) -> Self {
         crate::autostart::refresh();
         state.autostart = crate::autostart::is_enabled();
-        state.list_visible = !state.notes.iter().any(|n| n.open);
+        state.on_screen = Some(crate::screens::shows);
+        state.rescue_lost();
+        // The list also has to say when something is wrong with the notes.
+        let problem = state.protected || state.set_aside.is_some();
+        state.list_visible = problem || !state.notes.iter().any(|n| n.open);
+        let hiding_passes = if state.list_visible { 0 } else { HIDING_PASSES };
+        let woken = ctx.clone();
+        state.on_write_failed = Some(Arc::new(move || {
+            woken.request_repaint_of(ViewportId::ROOT);
+        }));
         let shared: Shared = Arc::new(Mutex::new(state));
         let (watched, ctx) = (shared.clone(), ctx.clone());
         instance::watch(move || {
-            watched.lock().expect("notes state").show_list = true;
-            ctx.request_repaint_of(egui::ViewportId::ROOT);
+            store::lock(&watched).show_list = true;
+            ctx.request_repaint_of(ViewportId::ROOT);
         });
         Self {
             shared,
             icon: icon(),
+            hiding_passes,
+            list_focus_until: None,
             _instance: instance,
         }
     }
@@ -56,7 +78,7 @@ impl App {
             let (position, size) = *state.spawned.entry(n.id).or_insert((n.position, n.size));
             let (id, shared) = (n.id, self.shared.clone());
             let builder = ViewportBuilder::default()
-                .with_title(APP_NAME)
+                .with_title(note::title(n))
                 .with_icon(self.icon.clone())
                 .with_app_id(APP_ID)
                 .with_decorations(false)
@@ -71,6 +93,38 @@ impl App {
                 ctx.request_repaint_of(note::viewport_id(id));
             }
         }
+        // A minimized window gets no pass of its own: it must be asked from
+        // here, and in that order, since the system can't focus it minimized.
+        for id in std::mem::take(&mut state.unminimize) {
+            let viewport = note::viewport_id(id);
+            ctx.send_viewport_cmd_to(viewport, ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd_to(viewport, ViewportCommand::Focus);
+        }
+        for id in std::mem::take(&mut state.forgotten) {
+            let text = egui::Id::new(("note-text", id));
+            ctx.data_mut(|d| d.remove::<TextEditState>(text));
+        }
+    }
+
+    fn show_list(&mut self, ctx: &egui::Context, state: &mut State) {
+        if state.show_list {
+            state.show_list = false;
+            state.list_visible = true;
+            self.hiding_passes = 0;
+            self.list_focus_until = Some(Instant::now() + LIST_FOCUS);
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+        }
+        // Asked again: a window just shown can't take the focus yet.
+        if let Some(until) = self.list_focus_until {
+            let focused = ctx.input(|i| i.viewport().focused) == Some(true);
+            if focused || Instant::now() >= until {
+                self.list_focus_until = None;
+            } else {
+                ctx.send_viewport_cmd(ViewportCommand::Focus);
+                ctx.request_repaint_after(Duration::from_millis(50));
+            }
+        }
     }
 }
 
@@ -78,22 +132,21 @@ impl eframe::App for App {
     /// Runs even while the main window is hidden.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let shared = self.shared.clone();
-        let mut guard = shared.lock().expect("notes state");
+        let mut guard = store::lock(&shared);
         let state = &mut *guard;
         if state.quit {
-            state.save();
-            ctx.send_viewport_cmd(ViewportCommand::Close);
-            return;
+            // Not without saying so, if the notes can't be saved.
+            if state.save() || state.quit_anyway {
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+                return;
+            }
+            state.quit = false;
+            state.quit_anyway = true;
+            state.show_list = true;
         }
-        if state.show_list {
-            state.show_list = false;
-            state.list_visible = true;
-            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(ViewportCommand::Focus);
-        }
-        // eframe shows the main window after its first paint, whatever it was
-        // built with.
-        if !state.list_visible && ctx.input(|i| i.viewport().visible()) != Some(false) {
+        self.show_list(ctx, state);
+        if self.hiding_passes > 0 {
+            self.hiding_passes -= 1;
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -106,7 +159,7 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let shared = self.shared.clone();
-        let mut state = shared.lock().expect("notes state");
+        let mut state = store::lock(&shared);
         if ui.ctx().input(|i| i.viewport().close_requested()) && !state.quit {
             // With notes on the desktop, closing the list only hides it.
             if state.notes.iter().any(|n| n.open) {
@@ -115,11 +168,14 @@ impl eframe::App for App {
                 state.list_visible = false;
             }
         }
-        crate::hub::ui(ui, &mut state);
+        // This pass also runs while hidden, to keep the notes' windows going.
+        if state.list_visible {
+            crate::hub::ui(ui, &mut state);
+        }
     }
 
     fn on_exit(&mut self) {
-        self.shared.lock().expect("notes state").save();
+        store::lock(&self.shared).save();
     }
 }
 
@@ -140,12 +196,14 @@ mod tests {
         let id = state.create(None);
         state.note_mut(id).expect("just created").text = text.into();
         state.raise = None;
+        let mut fonts_ready = false;
         let mut harness = egui_kittest::Harness::builder()
             .with_size([300.0, 300.0])
             .build_ui_state(
                 move |ui, state: &mut State| {
-                    if !ui.ctx().fonts(|f| f.definitions().families.len() > 2) {
+                    if !fonts_ready {
                         theme::install(ui.ctx());
+                        fonts_ready = true;
                         return;
                     }
                     note::body(ui, state, id);
@@ -168,12 +226,7 @@ mod tests {
         assert_eq!(harness.state().confirming_delete, None);
         harness.get_by_label(&t!("note-delete")).click();
         harness.run_steps(2);
-        // The band's button has the same name; the answer comes after it.
-        harness
-            .get_all_by_label(&t!("delete-yes"))
-            .last()
-            .expect("the answer")
-            .click();
+        harness.get_by_label(&t!("delete-yes")).click();
         harness.run_steps(2);
         assert!(harness.state().notes.is_empty());
     }
@@ -187,33 +240,151 @@ mod tests {
     }
 
     #[test]
-    fn choosing_a_color_and_pinning_change_the_note() {
+    fn colors_are_named_and_change_the_note() {
+        let mut harness = note_harness("x");
+        harness.get_by_label(&t!("note-color")).click();
+        harness.run_steps(2);
+        harness.get_by_label(&t!("color-pink")).click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().notes[0].color, Color::Pink);
+        assert_eq!(harness.state().choosing_color, None);
+    }
+
+    #[test]
+    fn pinning_keeps_the_note_on_top() {
         let mut harness = note_harness("x");
         harness.get_by_label(&t!("note-pin")).click();
         harness.run_steps(2);
         assert!(harness.state().notes[0].pinned);
+        harness.get_by_label(&t!("note-unpin")).click();
+        harness.run_steps(2);
+        assert!(!harness.state().notes[0].pinned);
+    }
+
+    #[test]
+    fn the_new_note_button_adds_a_note() {
+        let mut harness = note_harness("x");
         harness.get_by_label(&t!("note-new")).click();
         harness.run_steps(2);
         assert_eq!(harness.state().notes.len(), 2);
     }
 
-    #[test]
-    fn typing_goes_into_the_note() {
-        let mut harness = note_harness("");
-        harness.state_mut().raise = None;
-        let field = harness.get_by_role(egui::accesskit::Role::MultilineTextInput);
-        field.focus();
+    fn type_in_note(harness: &mut egui_kittest::Harness<'static, State>, text: &str) {
+        harness
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .focus();
         harness.run_steps(2);
         harness
             .get_by_role(egui::accesskit::Role::MultilineTextInput)
-            .type_text("Bonjour");
+            .type_text(text);
         harness.run_steps(2);
+    }
+
+    #[test]
+    fn typing_goes_into_the_note_and_marks_it_changed() {
+        let mut harness = note_harness("");
+        let revision = harness.state().revision();
+        type_in_note(&mut harness, "Bonjour");
         assert_eq!(harness.state().notes[0].text, "Bonjour");
-        assert!(harness.state().has_unsaved());
+        assert!(harness.state().revision() > revision);
+    }
+
+    #[test]
+    fn typing_goes_on_after_a_band_button() {
+        let mut harness = note_harness("");
+        type_in_note(&mut harness, "abc");
+        harness.get_by_label(&t!("note-pin")).click();
+        harness.run_steps(3);
+        harness
+            .get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .type_text("d");
+        harness.run_steps(2);
+        assert_eq!(harness.state().notes[0].text, "abcd");
+    }
+
+    /// The list with some notes.
+    fn list_harness(texts: &[&str]) -> egui_kittest::Harness<'static, State> {
+        let mut state = State::default();
+        for text in texts {
+            let id = state.create(None);
+            state.note_mut(id).expect("just created").text = (*text).into();
+        }
+        state.raise = None;
+        let mut fonts_ready = false;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size([360.0, 540.0])
+            .build_ui_state(
+                move |ui, state: &mut State| {
+                    if !fonts_ready {
+                        theme::install(ui.ctx());
+                        fonts_ready = true;
+                        return;
+                    }
+                    hub::ui(ui, state);
+                },
+                state,
+            );
+        harness.run_steps(3);
+        harness
+    }
+
+    #[test]
+    fn a_second_click_on_the_list_trash_does_not_delete() {
+        let mut harness = list_harness(&["Ne pas perdre"]);
+        let trash = harness.get_by_label(&t!("note-delete")).rect().center();
+        harness.get_by_label(&t!("note-delete")).click();
+        harness.run_steps(2);
+        assert_eq!(harness.state().confirming_delete, Some(1));
+        let keep = harness.get_by_label(&t!("delete-no")).rect();
+        let delete = harness.get_by_label(&t!("delete-yes")).rect();
+        assert!(!delete.contains(trash), "{delete:?} under {trash:?}");
+        assert!(keep.left() > delete.right() - 1.0);
+        harness.get_by_label(&t!("delete-yes")).click();
+        harness.run_steps(2);
+        assert!(harness.state().notes.is_empty());
+    }
+
+    #[test]
+    fn empty_notes_go_at_once_from_the_list_too() {
+        let mut harness = list_harness(&[""]);
+        harness.get_by_label(&t!("note-delete")).click();
+        harness.run_steps(2);
+        assert!(harness.state().notes.is_empty());
+    }
+
+    #[test]
+    fn a_card_reopens_its_note() {
+        let mut harness = list_harness(&["Courses"]);
+        harness.state_mut().notes[0].open = false;
+        harness.run_steps(2);
+        let label = format!("Courses ({})", t!("note-closed"));
+        harness.get_by_label(&label).click();
+        harness.run_steps(2);
+        assert!(harness.state().notes[0].open);
+        assert_eq!(harness.state().raise, Some(1));
+    }
+
+    #[test]
+    fn the_list_names_its_controls_and_says_what_is_wrong() {
+        let mut harness = list_harness(&["x"]);
+        harness.get_by_label(&t!("menu-settings"));
+        harness.get_by_label(&t!("list-new"));
+        harness.get_by_label(&t!("list-search"));
+        harness.state_mut().save_failed = true;
+        harness.run_steps(2);
+        harness.get_by_label(&t!("banner-save-failed"));
+    }
+
+    #[test]
+    fn hidden_text_styles_do_not_move_the_text() {
+        let mut harness = note_harness("a\u{FE0F}b");
+        type_in_note(&mut harness, "c");
+        assert!(harness.state().notes[0].text.contains('\u{FE0F}'));
     }
 
     /// A desktop with notes and the list, made of the real pieces, for the
-    /// website: `cargo test capture -- --ignored`. `PAPILLON_CAPTURE` names
+    /// website: `cargo test capture -- --ignored`, on its own since it changes
+    /// the language of the whole process. `PAPILLON_CAPTURE` names
     /// the file, `PAPILLON_LANG` the language (en, fr), `PAPILLON_THEME` the
     /// list's theme (light, dark).
     #[test]

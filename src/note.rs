@@ -1,8 +1,10 @@
 //! A note: its own window without a system frame, a strip at the top that
 //! moves it, its borders that resize it, and its text.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use eframe::egui::text_edit::TextEditState;
+use eframe::egui::util::undoer::{Settings, Undoer};
 use eframe::egui::viewport::ResizeDirection;
 use eframe::egui::{
     self, Color32, CursorIcon, Frame, Key, KeyboardShortcut, Modifiers, Pos2, Rect, RichText,
@@ -12,7 +14,7 @@ use egui_phosphor::regular as icon;
 
 use crate::app::Shared;
 use crate::i18n::t;
-use crate::store::{Color, Note, SAVE_DELAY, State};
+use crate::store::{self, Color, MIN_SIZE, Note, SAVE_DELAY, State};
 use crate::theme::{self, NoteColors, note_colors};
 
 const BAND_HEIGHT: f32 = 30.0;
@@ -23,12 +25,22 @@ const RESIZE_BORDER: f32 = 5.0;
 const RESIZE_CORNER: f32 = 14.0;
 /// A window sent away by the system while minimized (Windows puts it here).
 const MINIMIZED_FAR_AWAY: f32 = -30000.0;
+/// How far the arrow keys move or resize a window.
+const KEYBOARD_STEP: f32 = 20.0;
+/// Undo steps kept per note: each is a copy of the whole text.
+const UNDO_STEPS: usize = 30;
+/// Height of the question asked before deleting, with its buttons.
+pub const CONFIRM_HEIGHT: f32 = 44.0;
 
 const SHORTCUT_NEW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
 const SHORTCUT_CLOSE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
 
 pub fn viewport_id(id: u64) -> ViewportId {
     ViewportId::from_hash_of(("note", id))
+}
+
+fn text_id(id: u64) -> egui::Id {
+    egui::Id::new(("note-text", id))
 }
 
 pub fn level(pinned: bool) -> WindowLevel {
@@ -39,15 +51,33 @@ pub fn level(pinned: bool) -> WindowLevel {
     }
 }
 
+/// The title in the taskbar and when switching windows: the note's first line.
+pub fn title(note: &Note) -> String {
+    let (first, _) = note.preview();
+    if first.is_empty() {
+        crate::app::APP_NAME.to_owned()
+    } else {
+        first.chars().take(60).collect()
+    }
+}
+
+/// Redraws the open notes, after a setting they show changed.
+pub fn repaint_all(ctx: &egui::Context, state: &State) {
+    for note in state.notes.iter().filter(|n| n.open) {
+        ctx.request_repaint_of(viewport_id(note.id));
+    }
+}
+
 /// One pass of a note's window.
 pub fn window(ui: &mut egui::Ui, shared: &Shared, id: u64) {
     let ctx = ui.ctx().clone();
     // Locked for the whole pass: every window runs on the same thread, and
     // the only other user is the short request from `instance::watch`.
-    let mut guard = shared.lock().expect("notes state");
+    let mut guard = store::lock(shared);
     let state = &mut *guard;
 
     let before = state.notes.iter().filter(|n| n.open).count();
+    let revision = state.revision();
     let pixels = ctx.pixels_per_point();
     let (close, geometry) = ctx.input(|i| {
         let v = i.viewport();
@@ -55,25 +85,37 @@ pub fn window(ui: &mut egui::Ui, shared: &Shared, id: u64) {
             .outer_rect
             .zip(v.inner_rect)
             .map(|(outer, inner)| ((outer.min.to_vec2() * pixels).round(), inner.size()))
-            .filter(|(position, _)| v.minimized != Some(true) && position.x > MINIMIZED_FAR_AWAY);
+            .filter(|(position, _)| {
+                v.minimized != Some(true)
+                    // Screen-sized: not the size to come back to.
+                    && v.maximized != Some(true)
+                    && position.x > MINIMIZED_FAR_AWAY
+            });
         (v.close_requested(), geometry)
     });
-    let mut place = state.relocate.remove(&id);
     if let Some((position, size)) = geometry {
-        place = place.or(state.window_seen(id, position.into(), size.into(), Instant::now()));
-    }
-    if let Some(position) = place {
-        // In physical pixels, which is what is saved: a window created at a
-        // logical position lands elsewhere when the display is scaled.
-        let points = egui::Vec2::from(position) / pixels;
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(points.to_pos2()));
+        let mut place = state.relocate.remove(&id);
+        let first = state.window_seen(id, position.into(), size.into(), Instant::now());
+        if first.is_some() {
+            limit_undo(&ctx, id);
+        }
+        place = place.or(first);
+        if let Some(position) = place {
+            // In physical pixels, which is what is saved: a window created at
+            // a logical position lands elsewhere when the display is scaled.
+            let points = egui::Vec2::from(position) / pixels;
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(points.to_pos2()));
+        }
     }
     if state.raise == Some(id) {
         ctx.send_viewport_cmd(ViewportCommand::Focus);
     }
 
+    keyboard_geometry(&ctx, state, id);
     body(ui, state, id);
-    resize_grips(&ctx);
+    if resize_grips(&ctx) {
+        state.user_moves(id);
+    }
 
     if close || ctx.input_mut(|i| i.consume_shortcut(&SHORTCUT_CLOSE)) {
         state.close(id);
@@ -82,14 +124,59 @@ pub fn window(ui: &mut egui::Ui, shared: &Shared, id: u64) {
         state.create(Some(id));
     }
 
-    // Windows appear and disappear in the main window's pass.
+    // Windows appear and disappear in the main window's pass, which also
+    // shows the notes' changes in the list.
     let wanted = state.notes.iter().filter(|n| n.open).count();
-    if wanted != before || state.show_list || state.raise.is_some_and(|r| r != id) {
+    let list_stale = state.list_visible && state.revision() != revision;
+    if wanted != before || list_stale || state.show_list || state.raise.is_some_and(|r| r != id) {
         ctx.request_repaint_of(ViewportId::ROOT);
     }
     state.save_if_due();
     if state.has_unsaved() {
         ctx.request_repaint_after(SAVE_DELAY);
+    }
+}
+
+/// Each step of undo is a copy of the text: long notes would weigh a lot.
+fn limit_undo(ctx: &egui::Context, id: u64) {
+    let mut edit = TextEditState::load(ctx, text_id(id)).unwrap_or_default();
+    edit.set_undoer(Undoer::with_settings(Settings {
+        max_undos: UNDO_STEPS,
+        ..Default::default()
+    }));
+    edit.store(ctx, text_id(id));
+}
+
+/// Alt + arrows moves the window, Alt + Shift + arrows resizes it.
+fn keyboard_geometry(ctx: &egui::Context, state: &mut State, id: u64) {
+    let (mut moved, mut resized) = (egui::Vec2::ZERO, egui::Vec2::ZERO);
+    let alt_shift = Modifiers::ALT | Modifiers::SHIFT;
+    ctx.input_mut(|i| {
+        for (key, step) in [
+            (Key::ArrowLeft, vec2(-KEYBOARD_STEP, 0.0)),
+            (Key::ArrowRight, vec2(KEYBOARD_STEP, 0.0)),
+            (Key::ArrowUp, vec2(0.0, -KEYBOARD_STEP)),
+            (Key::ArrowDown, vec2(0.0, KEYBOARD_STEP)),
+        ] {
+            if i.consume_key(alt_shift, key) {
+                resized += step;
+            }
+            if i.consume_key(Modifiers::ALT, key) {
+                moved += step;
+            }
+        }
+    });
+    if moved == egui::Vec2::ZERO && resized == egui::Vec2::ZERO {
+        return;
+    }
+    state.user_moves(id);
+    let (outer, inner) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
+    if let (true, Some(outer)) = (moved != egui::Vec2::ZERO, outer) {
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(outer.min + moved));
+    }
+    if let (true, Some(inner)) = (resized != egui::Vec2::ZERO, inner) {
+        let size = (inner.size() + resized).max(MIN_SIZE.into());
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
     }
 }
 
@@ -115,12 +202,58 @@ pub fn body(ui: &mut egui::Ui, state: &mut State, id: u64) {
         top = strip.bottom();
     }
     if state.confirming_delete == Some(id) {
-        let strip = Rect::from_min_size(pos2(rect.left(), top), vec2(rect.width(), 40.0));
-        confirm_strip(ui, state, id, strip, &colors);
+        let height = CONFIRM_HEIGHT + 12.0;
+        let strip = Rect::from_min_size(pos2(rect.left(), top), vec2(rect.width(), height));
+        ui.painter().rect_filled(strip, 0.0, colors.band);
+        match confirm_row(ui, strip.shrink2(vec2(10.0, 6.0)), colors.ink, colors.hover) {
+            Some(true) => {
+                state.delete(id);
+                ui.ctx().request_repaint_of(ViewportId::ROOT);
+            }
+            Some(false) => {
+                state.confirming_delete = None;
+                state.refocus = Some(id);
+            }
+            None => {}
+        }
         top = strip.bottom();
     }
     let text_rect = Rect::from_min_max(pos2(rect.left(), top), rect.max);
     text(ui, state, id, text_rect, &colors);
+}
+
+/// "Delete this note?" above its answers: true to delete, false to keep.
+/// Keep is on the right, where the trash button is: a second click on the
+/// trash must not delete.
+pub fn confirm_row(ui: &mut egui::Ui, rect: Rect, ink: Color32, fill: Color32) -> Option<bool> {
+    let mut answer = None;
+    let mut area = ui.new_child(
+        UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    area.spacing_mut().item_spacing.y = 2.0;
+    area.spacing_mut().interact_size.y = 22.0;
+    area.spacing_mut().button_padding = vec2(8.0, 2.0);
+    area.add(
+        egui::Label::new(RichText::new(t!("delete-question")).color(ink))
+            .truncate()
+            .selectable(false),
+    );
+    area.with_layout(egui::Layout::right_to_left(egui::Align::Center), |row| {
+        let button = |text: String| {
+            egui::Button::new(RichText::new(text).color(ink))
+                .fill(fill)
+                .stroke(Stroke::NONE)
+        };
+        if row.add(button(t!("delete-no"))).clicked() {
+            answer = Some(false);
+        }
+        if row.add(button(t!("delete-yes"))).clicked() {
+            answer = Some(true);
+        }
+    });
+    answer
 }
 
 fn title_band(
@@ -133,8 +266,8 @@ fn title_band(
 ) {
     ui.painter().rect_filled(band, 0.0, colors.band);
     // Empty space moves the window. Registered first so that the buttons on
-    // top of it take precedence.
-    let background = ui.interact(band, ui.id().with("drag"), Sense::click_and_drag());
+    // top of it take precedence. Drag only: not a stop for the Tab key.
+    let background = ui.interact(band, ui.id().with("drag"), Sense::drag());
     if background.drag_started_by(egui::PointerButton::Primary) {
         state.user_moves(id);
         ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
@@ -157,76 +290,31 @@ fn title_band(
         });
         return;
     }
-    if theme::glyph_button(
-        &mut row,
-        icon::PLUS,
-        BUTTON,
-        ink,
-        hover,
-        false,
-        &t!("note-new"),
-    )
-    .clicked()
-    {
+    let button = |ui: &mut egui::Ui, glyph, on, tip: String| {
+        theme::glyph_button(ui, glyph, BUTTON, ink, hover, on, &tip).clicked()
+    };
+    if button(&mut row, icon::PLUS, false, t!("note-new")) {
         state.create(Some(id));
         row.ctx().request_repaint_of(ViewportId::ROOT);
     }
-    if theme::glyph_button(
-        &mut row,
-        icon::LIST,
-        BUTTON,
-        ink,
-        hover,
-        false,
-        &t!("note-list"),
-    )
-    .clicked()
-    {
+    if button(&mut row, icon::LIST, false, t!("note-list")) {
         state.show_list = true;
         row.ctx().request_repaint_of(ViewportId::ROOT);
+        state.refocus = Some(id);
     }
     row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |row| {
-        if theme::glyph_button(row, icon::X, BUTTON, ink, hover, false, &t!("note-close")).clicked()
-        {
+        if button(row, icon::X, false, t!("note-close")) {
             state.close(id);
             row.ctx().request_repaint_of(ViewportId::ROOT);
         }
-        if theme::glyph_button(
-            row,
-            icon::TRASH,
-            BUTTON,
-            ink,
-            hover,
-            false,
-            &t!("note-delete"),
-        )
-        .clicked()
-        {
-            let empty = state
-                .notes
-                .iter()
-                .any(|n| n.id == id && n.text.trim().is_empty());
-            if empty {
-                state.delete(id);
-                row.ctx().request_repaint_of(ViewportId::ROOT);
-            } else {
-                state.confirming_delete = Some(id);
-            }
+        if button(row, icon::TRASH, false, t!("note-delete")) && state.request_delete(id) {
+            row.ctx().request_repaint_of(ViewportId::ROOT);
         }
         pin_button(row, state, id, pinned, colors);
         let choosing = state.choosing_color == Some(id);
-        if theme::glyph_button(
-            row,
-            icon::PALETTE,
-            BUTTON,
-            ink,
-            hover,
-            choosing,
-            &t!("note-color"),
-        )
-        .clicked()
-        {
+        if button(row, icon::PALETTE, choosing, t!("note-color")) {
             state.choosing_color = (!choosing).then_some(id);
+            state.refocus = Some(id);
         }
     });
 }
@@ -237,23 +325,27 @@ fn pin_button(ui: &mut egui::Ui, state: &mut State, id: u64, pinned: bool, color
     } else {
         t!("note-pin")
     };
-    if theme::glyph_button(
-        ui,
-        icon::PUSH_PIN,
-        BUTTON,
-        colors.ink,
-        colors.hover,
-        pinned,
-        &tip,
-    )
-    .clicked()
-    {
+    let glyph = icon::PUSH_PIN;
+    if theme::glyph_button(ui, glyph, BUTTON, colors.ink, colors.hover, pinned, &tip).clicked() {
         if let Some(note) = state.note_mut(id) {
             note.pinned = !pinned;
         }
         state.touch();
         ui.ctx()
             .send_viewport_cmd(ViewportCommand::WindowLevel(level(!pinned)));
+        state.refocus = Some(id);
+    }
+}
+
+fn color_name(color: Color) -> String {
+    match color {
+        Color::Yellow => t!("color-yellow"),
+        Color::Green => t!("color-green"),
+        Color::Pink => t!("color-pink"),
+        Color::Purple => t!("color-purple"),
+        Color::Blue => t!("color-blue"),
+        Color::Gray => t!("color-gray"),
+        Color::Charcoal => t!("color-charcoal"),
     }
 }
 
@@ -267,10 +359,14 @@ fn color_strip(ui: &mut egui::Ui, state: &mut State, id: u64, strip: Rect, curre
             vec2(width, strip.height()),
         );
         let response = ui.interact(cell, ui.id().with(("color", i)), Sense::click());
+        let name = color_name(color);
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, color == current, &name)
+        });
         let swatch = cell.shrink2(vec2(2.0, 6.0));
         ui.painter()
             .rect_filled(swatch, 4.0, note_colors(color).paper);
-        if color == current || response.hovered() {
+        if color == current || response.hovered() || response.has_focus() {
             ui.painter().rect_stroke(
                 swatch,
                 4.0,
@@ -278,51 +374,35 @@ fn color_strip(ui: &mut egui::Ui, state: &mut State, id: u64, strip: Rect, curre
                 egui::StrokeKind::Inside,
             );
         }
-        if response.clicked() {
+        let clicked = response.clicked();
+        response.on_hover_text(name);
+        if clicked {
             if let Some(note) = state.note_mut(id) {
                 note.color = color;
             }
             state.choosing_color = None;
             state.touch();
+            state.refocus = Some(id);
         }
     }
-}
-
-fn confirm_strip(ui: &mut egui::Ui, state: &mut State, id: u64, strip: Rect, colors: &NoteColors) {
-    ui.painter().rect_filled(strip, 0.0, colors.band);
-    let mut row = ui.new_child(
-        UiBuilder::new()
-            .max_rect(strip.shrink2(vec2(10.0, 6.0)))
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    row.label(RichText::new(t!("delete-question")).color(colors.ink));
-    row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |row| {
-        let button = |text: String| {
-            egui::Button::new(RichText::new(text).color(colors.ink))
-                .fill(colors.hover)
-                .stroke(Stroke::NONE)
-        };
-        if row.add(button(t!("delete-yes"))).clicked() {
-            state.delete(id);
-            row.ctx().request_repaint_of(ViewportId::ROOT);
-        }
-        if row.add(button(t!("delete-no"))).clicked() {
-            state.confirming_delete = None;
-        }
-    });
 }
 
 fn text(ui: &mut egui::Ui, state: &mut State, id: u64, rect: Rect, colors: &NoteColors) {
     let size = state.text_size.points();
     let raise = state.raise == Some(id);
+    let refocus = state.refocus.take_if(|r| *r == id).is_some();
     let Some(note) = state.note_mut(id) else {
         return;
     };
+    crate::fonts::ensure_for(ui.ctx(), &note.text);
     let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
     child.set_clip_rect(rect);
     {
+        // Clear of the border that resizes the window.
+        child.spacing_mut().scroll.bar_outer_margin = RESIZE_BORDER + 1.0;
         let v = child.visuals_mut();
         v.dark_mode = colors.dark;
+        v.weak_text_color = Some(colors.muted);
         v.selection.bg_fill = Color32::from_rgba_unmultiplied(0x5A, 0x8C, 0xE6, 110);
         v.text_cursor.stroke = Stroke::new(2.0, colors.ink);
         v.widgets.inactive.fg_stroke.color = colors.muted;
@@ -331,63 +411,64 @@ fn text(ui: &mut egui::Ui, state: &mut State, id: u64, rect: Rect, colors: &Note
     }
     let mut changed = false;
     let mut focused = false;
+    let ink = colors.ink;
+    let mut layouter = move |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
+        let shown = crate::fonts::displayable(text.as_str());
+        let font = theme::regular(size);
+        let mut job = egui::text::LayoutJob::simple(shown.into_owned(), font, ink, wrap);
+        job.wrap.max_width = wrap;
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
     egui::ScrollArea::vertical()
         .auto_shrink(false)
         .show(&mut child, |ui| {
             Frame::new().inner_margin(10).show(ui, |ui| {
-                let hint = RichText::new(t!("note-hint"))
-                    .font(theme::regular(size))
-                    .color(colors.muted);
+                let hint = RichText::new(t!("note-hint")).font(theme::regular(size));
                 // Never smaller than the window: a click anywhere goes to the text.
                 let height = (rect.height() - 20.0).max(0.0);
-                let rows = (height / (size * 1.3)).floor().max(1.0) as usize;
                 let response = ui.add(
                     TextEdit::multiline(&mut note.text)
-                        .id(egui::Id::new(("note-text", id)))
+                        .id(text_id(id))
                         .frame(Frame::NONE)
                         .font(theme::regular(size))
-                        .text_color(colors.ink)
+                        .text_color(ink)
                         .hint_text(hint)
                         .desired_width(f32::INFINITY)
-                        .desired_rows(rows)
+                        .min_size(vec2(0.0, height))
+                        .layouter(&mut layouter)
                         .lock_focus(true),
                 );
+                ui.ctx().accesskit_node_builder(response.id, |node| {
+                    node.set_label(t!("note-text-label"));
+                });
                 changed = response.changed();
                 focused = response.has_focus();
-                if raise {
+                // After the widget: it gives the focus up in the very pass of
+                // a click elsewhere.
+                if raise || refocus {
                     response.request_focus();
                 }
             });
         });
     if changed {
-        update_title(ui, note);
+        let title = title(note);
+        ui.ctx().send_viewport_cmd(ViewportCommand::Title(title));
         state.text_changed(id);
     }
-    // Keep asking until the window has the focus and the text with it.
+    // Keep asking until the window has the focus and the text with it, for a
+    // moment: the system may well refuse.
     if raise {
-        if focused && ui.ctx().input(|i| i.viewport().focused == Some(true)) {
-            state.raise = None;
-        } else {
-            ui.ctx().request_repaint();
+        let got_it = focused && ui.ctx().input(|i| i.viewport().focused == Some(true));
+        if !state.raise_over(got_it) {
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
         }
     }
 }
 
-/// The title in the taskbar and when switching windows: the note's first line.
-fn update_title(ui: &egui::Ui, note: &Note) {
-    let (first, _) = note.preview();
-    let title = if first.is_empty() {
-        crate::app::APP_NAME
-    } else {
-        first
-    };
-    ui.ctx()
-        .send_viewport_cmd(ViewportCommand::Title(title.chars().take(60).collect()));
-}
-
 /// Invisible strips along the window borders that resize it (the window has
 /// no system frame).
-fn resize_grips(ctx: &egui::Context) {
+fn resize_grips(ctx: &egui::Context) -> bool {
+    let mut resizing = false;
     let r = ctx.content_rect();
     let b = RESIZE_BORDER;
     let strips = [
@@ -409,10 +490,12 @@ fn resize_grips(ctx: &egui::Context) {
                 ctx.set_cursor_icon(resize_cursor(direction));
                 if response.is_pointer_button_down_on() && ui.input(|i| i.pointer.primary_pressed())
                 {
+                    resizing = true;
                     ctx.send_viewport_cmd(ViewportCommand::BeginResize(direction));
                 }
             });
     }
+    resizing
 }
 
 /// Which border or corner of `window` is under `pos`.
@@ -444,5 +527,20 @@ fn resize_cursor(direction: ResizeDirection) -> CursorIcon {
         ResizeDirection::SouthEast => CursorIcon::ResizeSouthEast,
         ResizeDirection::NorthWest => CursorIcon::ResizeNorthWest,
         ResizeDirection::SouthWest => CursorIcon::ResizeSouthWest,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn borders_and_corners_resize_the_right_way() {
+        let window = Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 300.0));
+        let at = |x, y| resize_direction(window, pos2(x, y));
+        assert_eq!(at(1.0, 1.0), ResizeDirection::NorthWest);
+        assert_eq!(at(299.0, 299.0), ResizeDirection::SouthEast);
+        assert_eq!(at(150.0, 1.0), ResizeDirection::North);
+        assert_eq!(at(299.0, 150.0), ResizeDirection::East);
     }
 }
